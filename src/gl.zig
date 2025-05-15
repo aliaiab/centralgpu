@@ -7,7 +7,7 @@ pub const GL_QUADS: u32 = 0x0007;
 
 pub const Context = struct {
     gpa: std.mem.Allocator,
-    bound_render_target: centralgfx.Image = undefined,
+    bound_render_target: centralgpu.Image = undefined,
 
     clear_color: u32 = 0xff_00_00_00,
     should_clear_color_attachment: bool = false,
@@ -17,7 +17,7 @@ pub const Context = struct {
     modelview_matrix_stack_index: usize = 0,
 
     triangle_count: usize = 0,
-    triangle_positions: std.ArrayListUnmanaged([3]centralgfx.WarpVec3(f32)) = .empty,
+    triangle_positions: std.ArrayListUnmanaged([3]centralgpu.WarpVec3(f32)) = .empty,
     triangle_colors: std.ArrayListUnmanaged([3]u32) = .empty,
 
     scale: [3]f32 = @splat(1),
@@ -31,7 +31,7 @@ pub const GL_COLOR_BUFFER_BIT: u32 = 0x00004000;
 pub fn glClearColor(r: f32, g: f32, b: f32, a: f32) void {
     const context = current_context.?;
 
-    context.clear_color = @bitCast(centralgfx.Rgba32.fromNormalized(.{ r, g, b, a }));
+    context.clear_color = @bitCast(centralgpu.Rgba32.fromNormalized(.{ r, g, b, a }));
 }
 
 pub fn glClear(flags: u32) callconv(.c) void {
@@ -143,7 +143,7 @@ pub fn glColor4f(r: f32, g: f32, b: f32, a: f32) callconv(.c) void {
 
     const tri = &context.triangle_colors.items[context.triangle_count - 1];
 
-    tri[context.triangle_vertex_index] = @bitCast(centralgfx.Rgba32.fromNormalized(.{ r, g, b, a }));
+    tri[context.triangle_vertex_index] = @bitCast(centralgpu.Rgba32.fromNormalized(.{ r, g, b, a }));
 }
 
 pub fn glVertex2f(x: f32, y: f32) callconv(.c) void {
@@ -171,7 +171,7 @@ pub fn glFlush() callconv(.c) void {
     const triangle_group_count = context.triangle_count / 8 + @intFromBool(context.triangle_count % 8 != 0);
 
     for (0..triangle_group_count) |triangle_group_id| {
-        var out_triangle: centralgfx.WarpProjectedTriangle = undefined;
+        var out_triangle: centralgpu.WarpProjectedTriangle = undefined;
 
         const in_triangle = context.triangle_positions.items[triangle_group_id];
 
@@ -190,8 +190,8 @@ pub fn glFlush() callconv(.c) void {
         for (in_triangle, 0..) |tri, i| {
             out_triangle.points[i] = .{ .x = tri.x, .y = tri.y, .z = tri.z, .w = @splat(1) };
 
-            const viewport_width: centralgfx.WarpRegister(f32) = @splat(@floatFromInt(context.bound_render_target.width));
-            const viewport_height: centralgfx.WarpRegister(f32) = @splat(@floatFromInt(context.bound_render_target.height));
+            const viewport_width: centralgpu.WarpRegister(f32) = @splat(@floatFromInt(context.bound_render_target.width));
+            const viewport_height: centralgpu.WarpRegister(f32) = @splat(@floatFromInt(context.bound_render_target.height));
 
             out_triangle.points[i].x = out_triangle.points[i].x * viewport_width;
             out_triangle.points[i].y = out_triangle.points[i].y * -viewport_height;
@@ -217,7 +217,7 @@ pub fn glFlush() callconv(.c) void {
             }
         }
 
-        centralgfx.rasterize(
+        centralgpu.rasterize(
             .{
                 .vertex_colours = context.triangle_colors.items,
             },
@@ -260,4 +260,4 @@ fn ensureVertexCapacity() !void {
 }
 
 const std = @import("std");
-const centralgfx = @import("root.zig");
+const centralgpu = @import("root.zig");

@@ -1,7 +1,7 @@
 pub fn main() !void {
     const gpa = std.heap.smp_allocator;
 
-    _ = sdl.SDL_SetAppMetadata("Centralgfx Example", "0.0.0", "Centralgfx Example");
+    _ = sdl.SDL_SetAppMetadata("CentralGpu Example", "0.0.0", "CentralGpu Example");
 
     std.debug.assert(sdl.SDL_Init(0));
     defer sdl.SDL_Quit();
@@ -13,7 +13,7 @@ pub fn main() !void {
     const window_height = 480 / 2;
 
     _ = sdl.SDL_CreateWindowAndRenderer(
-        "Centralgfx Example",
+        "Centralgpu Example",
         1600,
         900,
         sdl.SDL_WINDOW_RESIZABLE,
@@ -34,10 +34,10 @@ pub fn main() !void {
 
     _ = sdl.SDL_SetTextureScaleMode(target_texture, sdl.SDL_SCALEMODE_NEAREST);
 
-    const target_buffer = try gpa.alloc(centralgfx.Rgba32, window_width * window_height);
+    const target_buffer = try gpa.alloc(centralgpu.Rgba32, window_width * window_height);
     defer gpa.free(target_buffer);
 
-    const target_buffer_linear = try gpa.alloc(centralgfx.Rgba32, window_width * window_height);
+    const target_buffer_linear = try gpa.alloc(centralgpu.Rgba32, window_width * window_height);
     defer gpa.free(target_buffer_linear);
 
     var sdl_event: sdl.SDL_Event = undefined;
@@ -64,14 +64,14 @@ pub fn main() !void {
 
         const vertex_colors: [2][3]u32 = .{
             .{
-                @bitCast(centralgfx.Rgba32.fromNormalized(.{ 1, 0, 0, 1 })),
-                @bitCast(centralgfx.Rgba32.fromNormalized(.{ 0, 1, 0, 1 })),
-                @bitCast(centralgfx.Rgba32.fromNormalized(.{ 0, 0, 1, 1 })),
+                @bitCast(centralgpu.Rgba32.fromNormalized(.{ 1, 0, 0, 1 })),
+                @bitCast(centralgpu.Rgba32.fromNormalized(.{ 0, 1, 0, 1 })),
+                @bitCast(centralgpu.Rgba32.fromNormalized(.{ 0, 0, 1, 1 })),
             },
             .{
-                @bitCast(centralgfx.Rgba32.fromNormalized(.{ 0.4, 0, 1, 1 })),
-                @bitCast(centralgfx.Rgba32.fromNormalized(.{ 0, 1, 0, 1 })),
-                @bitCast(centralgfx.Rgba32.fromNormalized(.{ 1, 0.4, 0, 1 })),
+                @bitCast(centralgpu.Rgba32.fromNormalized(.{ 0.4, 0, 1, 1 })),
+                @bitCast(centralgpu.Rgba32.fromNormalized(.{ 0, 1, 0, 1 })),
+                @bitCast(centralgpu.Rgba32.fromNormalized(.{ 1, 0.4, 0, 1 })),
             },
         };
 
@@ -100,7 +100,7 @@ pub fn main() !void {
             //         .{ 450, 450 },
             //         .{ 50, 450 },
 
-            var out_triangle: centralgfx.WarpProjectedTriangle = undefined;
+            var out_triangle: centralgpu.WarpProjectedTriangle = undefined;
 
             out_triangle.mask = @splat(false);
             out_triangle.mask[0] = true;
@@ -129,7 +129,7 @@ pub fn main() !void {
             // // ^ 5733075ns
 
             // //   1159267ns
-            centralgfx.rasterize(
+            centralgpu.rasterize(
                 .{
                     .vertex_colours = &vertex_colors,
                 },
@@ -278,5 +278,5 @@ fn repeatedMul(value: comptime_float, comptime n: comptime_int) comptime_float {
 
 const std = @import("std");
 const sdl = @import("sdl");
-const centralgfx = @import("root.zig");
+const centralgpu = @import("root.zig");
 const gl = @import("gl.zig");

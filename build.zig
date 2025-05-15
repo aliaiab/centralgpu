@@ -31,7 +31,7 @@ pub fn build(b: *std.Build) void {
     exe_mod.addImport("sdl", sdl_translate.createModule());
 
     const exe = b.addExecutable(.{
-        .name = "centralgfx_example",
+        .name = "centralgpu_example",
         .root_module = exe_mod,
     });
 
