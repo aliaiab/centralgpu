@@ -10,6 +10,13 @@ pub const Context = struct {
     bound_render_target: centralgpu.Image = undefined,
 
     clear_color: u32 = 0xff_00_00_00,
+    viewport: struct { x: i32, y: i32, width: isize, height: isize } = undefined,
+    scissor: struct { x: i32, y: i32, width: isize, height: isize } = undefined,
+
+    //Base color texture
+    texture_image: []u8 = &.{},
+    texture_descriptor: centralgpu.ImageDescriptor = undefined,
+
     should_clear_color_attachment: bool = false,
     triangle_vertex_index: u32 = 0,
 
@@ -19,6 +26,7 @@ pub const Context = struct {
     triangle_count: usize = 0,
     triangle_positions: std.ArrayListUnmanaged([3]centralgpu.WarpVec3(f32)) = .empty,
     triangle_colors: std.ArrayListUnmanaged([3]u32) = .empty,
+    triangle_tex_coords: std.ArrayListUnmanaged([3][2]f32) = .empty,
 
     scale: [3]f32 = @splat(1),
     translate: [3]f32 = @splat(0),
@@ -42,11 +50,82 @@ pub fn glClear(flags: u32) callconv(.c) void {
     }
 }
 
-pub fn glViewport(x: i32, y: i32, w: isize, h: isize) void {
-    _ = x; // autofix
-    _ = y; // autofix
-    _ = w; // autofix
-    _ = h; // autofix
+pub fn glViewport(x: i32, y: i32, w: isize, h: isize) callconv(.c) void {
+    const context = current_context.?;
+
+    context.viewport = .{
+        .x = x,
+        .y = y,
+        .width = w,
+        .height = h,
+    };
+}
+
+pub fn glScissor(x: i32, y: i32, w: isize, h: isize) callconv(.c) void {
+    const context = current_context.?;
+
+    context.scissor = .{
+        .x = x,
+        .y = y,
+        .width = w,
+        .height = h,
+    };
+}
+
+pub fn glTexImage2D(
+    target: i32,
+    level: i32,
+    components: i32,
+    width: isize,
+    height: isize,
+    border: i32,
+    format: i32,
+    _type: i32,
+    data: *const anyopaque,
+) callconv(.c) void {
+    const context = current_context.?;
+
+    const dest_data_size: usize = @intCast(width * height * @sizeOf(u32));
+    const src_data_size: usize = @intCast(width * height * 3);
+
+    const image_data = std.heap.page_allocator.alloc(centralgpu.Rgba32, dest_data_size) catch @panic("");
+
+    const source_data_ptr: [*]const u8 = @ptrCast(data);
+    const source_data: []const u8 = source_data_ptr[0..src_data_size];
+
+    var y: usize = 0;
+
+    while (y < height) : (y += 1) {
+        var x: usize = 0;
+
+        while (x < width) : (x += 1) {
+            const src_index = x + y * @as(usize, @intCast(width));
+            const index = centralgpu.mortonEncode(@splat(@intCast(x)), @splat(@intCast(y)))[0];
+
+            image_data[index] = .{
+                .r = source_data[src_index * 3 + 0],
+                .g = source_data[src_index * 3 + 1],
+                .b = source_data[src_index * 3 + 2],
+                .a = 255,
+            };
+        }
+    }
+
+    context.texture_image = @ptrCast(image_data);
+    context.texture_descriptor = .{
+        .rel_ptr = 0,
+        .width_log2 = @intCast(std.math.log2_int(usize, @intCast(width))),
+        .height_log2 = @intCast(std.math.log2_int(usize, @intCast(height))),
+        .sampler_filter = .nearest,
+        .sampler_address_mode = .repeat,
+    };
+
+    _ = _type; // autofix
+    _ = target; // autofix
+    _ = level; // autofix
+    _ = components; // autofix
+    _ = border; // autofix
+    _ = format; // autofix
 }
 
 pub fn glBegin(flags: u32) callconv(.c) void {
@@ -146,6 +225,16 @@ pub fn glColor4f(r: f32, g: f32, b: f32, a: f32) callconv(.c) void {
     tri[context.triangle_vertex_index] = @bitCast(centralgpu.Rgba32.fromNormalized(.{ r, g, b, a }));
 }
 
+pub fn glTexCoord2f(u: f32, v: f32) callconv(.c) void {
+    const context = current_context.?;
+
+    ensureVertexCapacity() catch @panic("oom");
+
+    const tri = &context.triangle_tex_coords.items[context.triangle_count - 1];
+
+    tri[context.triangle_vertex_index] = .{ u, v };
+}
+
 pub fn glVertex2f(x: f32, y: f32) callconv(.c) void {
     glVertex3f(x, y, 0);
 }
@@ -162,8 +251,11 @@ pub fn glFlush() callconv(.c) void {
     const context = current_context.?;
 
     if (context.should_clear_color_attachment) {
+        const actual_width = centralgpu.computeTargetPaddedSize(context.bound_render_target.width);
+        const actual_height = centralgpu.computeTargetPaddedSize(context.bound_render_target.height);
+
         @memset(
-            context.bound_render_target.pixel_ptr[0 .. context.bound_render_target.width * context.bound_render_target.height],
+            context.bound_render_target.pixel_ptr[0 .. actual_width * actual_height],
             @bitCast(context.clear_color),
         );
     }
@@ -172,8 +264,11 @@ pub fn glFlush() callconv(.c) void {
 
     for (0..triangle_group_count) |triangle_group_id| {
         const unfiorms: centralgpu.Uniforms = .{
-            .vertex_colours = context.triangle_colors.items,
             .vertex_positions = context.triangle_positions.items,
+            .vertex_colours = context.triangle_colors.items,
+            .vertex_texture_coords = context.triangle_tex_coords.items,
+            .image_base = context.texture_image.ptr,
+            .image_descriptor = context.texture_descriptor,
         };
 
         var triangle_mask: centralgpu.WarpRegister(bool) = @splat(true);
@@ -188,11 +283,11 @@ pub fn glFlush() callconv(.c) void {
             }
         }
 
-        const viewport_x: f32 = 0;
-        const viewport_y: f32 = 0;
+        const viewport_x: f32 = @floatFromInt(context.viewport.x);
+        const viewport_y: f32 = @floatFromInt(context.viewport.y);
 
-        const viewport_width: f32 = @floatFromInt(context.bound_render_target.width);
-        const viewport_height: f32 = @floatFromInt(context.bound_render_target.height);
+        const viewport_width: f32 = @floatFromInt(context.viewport.width);
+        const viewport_height: f32 = @floatFromInt(context.viewport.height);
 
         const projected_triangles = centralgpu.processGeometry(
             .{
@@ -214,13 +309,13 @@ pub fn glFlush() callconv(.c) void {
 
         centralgpu.rasterize(
             .{
-                .scissor_min_x = 100,
-                .scissor_min_y = 100,
-                .scissor_max_x = @intCast(400),
-                .scissor_max_y = @intCast(400),
+                .scissor_min_x = context.scissor.x,
+                .scissor_min_y = context.scissor.y,
+                .scissor_max_x = @truncate(context.scissor.width),
+                .scissor_max_y = @truncate(context.scissor.height),
+                .render_target = context.bound_render_target,
             },
             unfiorms,
-            context.bound_render_target,
             triangle_group_id * 8,
             projected_triangles,
         );
@@ -228,6 +323,7 @@ pub fn glFlush() callconv(.c) void {
 
     context.triangle_positions.clearRetainingCapacity();
     context.triangle_colors.clearRetainingCapacity();
+    context.triangle_tex_coords.clearRetainingCapacity();
     context.triangle_count = 0;
     context.triangle_vertex_index = 0;
     context.scale = @splat(1);
@@ -251,6 +347,7 @@ fn ensureVertexCapacity() !void {
 
     if (context.triangle_vertex_index == 0) {
         _ = context.triangle_colors.addOne(context.gpa) catch @panic("");
+        _ = context.triangle_tex_coords.addOne(context.gpa) catch @panic("");
 
         if (context.triangle_positions.items.len < context.triangle_count * 8) {
             _ = context.triangle_positions.addOne(context.gpa) catch @panic("");
