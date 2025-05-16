@@ -9,8 +9,8 @@ pub fn main() !void {
     var window: ?*sdl.SDL_Window = undefined;
     var renderer: ?*sdl.SDL_Renderer = undefined;
 
-    const window_width = 640 / 2;
-    const window_height = 480 / 2;
+    const window_width = 640 / 1;
+    const window_height = 480 / 1;
 
     _ = sdl.SDL_CreateWindowAndRenderer(
         "Centralgpu Example",
@@ -148,8 +148,8 @@ pub fn main() !void {
             gl.glClear(gl.GL_COLOR_BUFFER_BIT);
             gl.glBegin(gl.GL_TRIANGLES);
 
-            gl.glScale3f(0.25, 0.25, 1);
-            gl.glTranslate3f(0.5, -0.5, 0);
+            gl.glScale3f(0.5, 0.5, 1);
+            // gl.glTranslate3f(0.5, -0.5, 0);
 
             gl.glColor3f(1.0, 0.0, 0.0);
             gl.glVertex2i(0, 1);
@@ -161,13 +161,13 @@ pub fn main() !void {
             gl.glVertex2i(1, -1);
 
             gl.glColor3f(1.0, 0.0, 0.0);
-            gl.glVertex2f(@sin(time_since_start * 0.001), 1);
+            gl.glVertex2f(@sin(time_since_start * 0.001) * 2, 1);
 
             gl.glColor3f(0.0, 1.0, 0.0);
-            gl.glVertex2f(-1 + @sin(time_since_start * 0.001), -1);
+            gl.glVertex2f(-1 + @sin(time_since_start * 0.001) * 2, -1);
 
             gl.glColor3f(0.0, 0.0, 1.0);
-            gl.glVertex2f(1 + @sin(time_since_start * 0.001), -1);
+            gl.glVertex2f(1 + @sin(time_since_start * 0.001) * 2, -1);
 
             gl.glEnd();
 
@@ -244,36 +244,6 @@ pub fn main() !void {
         _ = sdl.SDL_RenderTexture(renderer, target_texture, null, null);
         _ = sdl.SDL_RenderPresent(renderer);
     }
-}
-
-pub fn cosTurns(x: f32) f32 {
-    const r = @abs(x) - @floor(@abs(x));
-
-    return r;
-}
-
-fn cosCoff(comptime n: comptime_int) comptime_float {
-    return (if (n % 2 == 0) 1 else -1) * repeatedMul(std.math.tau, 2 * n) / factorial(2 * n);
-}
-
-fn factorial(value: comptime_int) comptime_int {
-    var result: comptime_int = 1;
-
-    for (0..value) |k| {
-        result *= (value - k);
-    }
-
-    return result;
-}
-
-fn repeatedMul(value: comptime_float, comptime n: comptime_int) comptime_float {
-    var result: comptime_float = 1;
-
-    for (0..n) |_| {
-        result *= value;
-    }
-
-    return result;
 }
 
 const std = @import("std");

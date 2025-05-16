@@ -171,59 +171,58 @@ pub fn glFlush() callconv(.c) void {
     const triangle_group_count = context.triangle_count / 8 + @intFromBool(context.triangle_count % 8 != 0);
 
     for (0..triangle_group_count) |triangle_group_id| {
-        var out_triangle: centralgpu.WarpProjectedTriangle = undefined;
+        const unfiorms: centralgpu.Uniforms = .{
+            .vertex_colours = context.triangle_colors.items,
+            .vertex_positions = context.triangle_positions.items,
+        };
 
-        const in_triangle = context.triangle_positions.items[triangle_group_id];
-
-        out_triangle.mask = @splat(true);
+        var triangle_mask: centralgpu.WarpRegister(bool) = @splat(true);
 
         if (triangle_group_id == triangle_group_count - 1) {
             const remainder = @rem(context.triangle_count, 8);
 
-            out_triangle.mask = @splat(false);
+            triangle_mask = @splat(false);
 
             for (0..remainder) |mask_index| {
-                out_triangle.mask[mask_index] = true;
+                triangle_mask[mask_index] = true;
             }
         }
 
-        for (in_triangle, 0..) |tri, i| {
-            out_triangle.points[i] = .{ .x = tri.x, .y = tri.y, .z = tri.z, .w = @splat(1) };
+        const viewport_x: f32 = 0;
+        const viewport_y: f32 = 0;
 
-            const viewport_width: centralgpu.WarpRegister(f32) = @splat(@floatFromInt(context.bound_render_target.width));
-            const viewport_height: centralgpu.WarpRegister(f32) = @splat(@floatFromInt(context.bound_render_target.height));
+        const viewport_width: f32 = @floatFromInt(context.bound_render_target.width);
+        const viewport_height: f32 = @floatFromInt(context.bound_render_target.height);
 
-            out_triangle.points[i].x = out_triangle.points[i].x * viewport_width;
-            out_triangle.points[i].y = out_triangle.points[i].y * -viewport_height;
-        }
+        const projected_triangles = centralgpu.processGeometry(
+            .{
+                .viewport_transform = .{
+                    .translation_x = viewport_x + viewport_width * 0.5,
+                    .translation_y = viewport_y + viewport_height * 0.5,
+                    .scale_x = viewport_width * 0.5,
+                    .scale_y = -viewport_height * 0.5,
+                },
+            },
+            unfiorms,
+            triangle_group_id * 8,
+            triangle_mask,
+        );
 
-        out_triangle.unclipped_points = out_triangle.points;
-
-        if (false) {
-            for (out_triangle.points, 0..) |point, i| {
-                _ = point; // autofix
-                for (0..8) |tri_index| {
-                    if (out_triangle.mask[tri_index]) {
-                        std.log.info("[tri: {}][vtx: {}]out_triangle_pos: x: {}, y: {}, z: {}, col: x{x}", .{
-                            tri_index,
-                            i,
-                            out_triangle.points[i].x[tri_index],
-                            out_triangle.points[i].y[tri_index],
-                            out_triangle.points[i].z[tri_index],
-                            context.triangle_colors.items[triangle_group_id * 8 + tri_index][i],
-                        });
-                    }
-                }
-            }
+        if (std.simd.countTrues(projected_triangles.mask) == 0) {
+            continue;
         }
 
         centralgpu.rasterize(
             .{
-                .vertex_colours = context.triangle_colors.items,
+                .scissor_min_x = 100,
+                .scissor_min_y = 100,
+                .scissor_max_x = @intCast(400),
+                .scissor_max_y = @intCast(400),
             },
+            unfiorms,
             context.bound_render_target,
             triangle_group_id * 8,
-            out_triangle,
+            projected_triangles,
         );
     }
 
