@@ -24,7 +24,7 @@
     // original project's identity. Thus it is recommended to leave the comment
     // on the following line intact, so that it shows up in code reviews that
     // modify the field.
-    .fingerprint = 0x1dc6f7a7e72417cb, // Changing this has security and trust implications.
+    .fingerprint = 0xc368ce334bc7659e, // Changing this has security and trust implications.
 
     // Tracks the earliest Zig version that the package considers to be a
     // supported use case.
@@ -38,7 +38,7 @@
     .dependencies = .{
         .sdl = .{
             .url = "https://github.com/castholm/SDL/archive/main/dbb1b96360658f5845ff6fac380c4f13d7276dc2.tar.gz",
-            .hash = "sdl-0.2.0+3.2.8-7uIn9FxHfQE325TK7b0qpgt10G3x1xl-3ZMOfTzxUg3C",
+            .hash = "sdl-0.2.3+3.2.14-7uIn9BR5fgHLSuR3NxLrwhUENvEQwoNBeV2-johgGda_",
         },
     },
     .paths = .{
