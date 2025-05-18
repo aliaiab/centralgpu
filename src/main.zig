@@ -53,23 +53,73 @@ pub fn main() !void {
         .gpa = gpa,
         .bound_render_target = .{ .pixel_ptr = target_buffer.ptr, .width = render_target_width, .height = render_target_height },
     };
-
-    const test_texture_data = try std.fs.cwd().readFileAlloc(gpa, "zig-out/bin/shambler_base_color.data", std.math.maxInt(usize));
+    const shambler_texture_data = try std.fs.cwd().readFileAlloc(gpa, "zig-out/bin/shambler_base_color.data", std.math.maxInt(usize));
+    defer gpa.free(shambler_texture_data);
+    // const test_texture_data = try std.fs.cwd().readFileAlloc(gpa, "zig-out/bin/texture_liquid.data", std.math.maxInt(usize));
+    const test_texture_data = try std.fs.cwd().readFileAlloc(gpa, "zig-out/bin/wood_floor.data", std.math.maxInt(usize));
     defer gpa.free(test_texture_data);
 
+    var shambler_texture: u32 = 0;
+
+    gl.glGenTextures(1, &shambler_texture);
+
+    std.debug.assert(shambler_texture != 0);
+
+    gl.glBindTexture(gl.GL_TEXTURE_2D, shambler_texture);
+
+    gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR_MIPMAP_LINEAR);
+    gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_LINEAR_MIPMAP_LINEAR);
+
+    gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_EDGE);
+    gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE);
+
     gl.glTexImage2D(
+        gl.GL_TEXTURE_2D,
         0,
-        0,
-        0,
+        gl.GL_RGBA,
         1024,
-        // 800,
         256,
+        // 800,
         // 600,
+        // 242,
+        // 84,
         0,
+        gl.GL_RGBA,
+        gl.GL_UNSIGNED_BYTE,
+        shambler_texture_data.ptr,
+    );
+
+    var test_texture_handle: u32 = 0;
+
+    gl.glGenTextures(1, &test_texture_handle);
+
+    std.debug.assert(test_texture_handle != 0);
+
+    gl.glBindTexture(gl.GL_TEXTURE_2D, test_texture_handle);
+
+    gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR_MIPMAP_LINEAR);
+    gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_LINEAR_MIPMAP_LINEAR);
+
+    gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_EDGE);
+    gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE);
+
+    gl.glTexImage2D(
+        gl.GL_TEXTURE_2D,
         0,
+        gl.GL_RGBA,
+        // 1024,
+        // 256,
+        800,
+        600,
+        // 242,
+        // 84,
         0,
+        gl.GL_RGBA,
+        gl.GL_UNSIGNED_BYTE,
         test_texture_data.ptr,
     );
+    gl.glGenerateMipmap(gl.GL_TEXTURE_2D);
+    gl.glBindTexture(gl.GL_TEXTURE_2D, 0);
 
     const use_gpu_for_scaling: bool = @import("builtin").mode == .Debug;
 
@@ -84,42 +134,146 @@ pub fn main() !void {
 
         const time_since_start: f32 = @floatFromInt(std.time.milliTimestamp() - start_time);
 
+        const matrix_math = @import("gl/matrix.zig");
+
+        var window_width_int: i32 = 0;
+        var window_height_int: i32 = 0;
+
+        _ = sdl.SDL_GetWindowSize(window, &window_width_int, &window_height_int);
+
+        const aspect_ratio: f32 = @as(f32, @floatFromInt(window_width_int)) / @as(f32, @floatFromInt(window_height_int));
+
+        if (getKeyPressed(sdl.SDL_SCANCODE_F)) {
+            // gl.current_context.?.texture_descriptor.sampler_filter = switch (gl.current_context.?.texture_descriptor.sampler_filter) {
+            //     .nearest => .bilinear,
+            //     .bilinear => .nearest,
+            // };
+        }
+
+        if (getKeyPressed(sdl.SDL_SCANCODE_T)) {
+            // gl.current_context.?.texture_descriptor.sampler_address_mode = switch (gl.current_context.?.texture_descriptor.sampler_address_mode) {
+            // .repeat => .clamp_to_edge,
+            // .clamp_to_edge => .clamp_to_border,
+            // .clamp_to_border => .repeat,
+            // };
+        }
+
+        if (getKeyPressed(sdl.SDL_SCANCODE_B)) {
+            // gl.current_context.?.texture_descriptor.border_colour_shift_amount +%= 1;
+
+            // gl.current_context.?.texture_descriptor.border_colour_shift_amount %= 5;
+        }
+
         if (true) {
             gl.glViewport(0, 0, render_target_width, render_target_height);
             gl.glScissor(0, 0, render_target_width, render_target_height);
 
             gl.glClearColor(0, 0.2, 0.3, 1);
             gl.glClear(gl.GL_COLOR_BUFFER_BIT);
-            gl.glBegin(gl.GL_TRIANGLES);
 
-            // gl.glScale3f(1, 0.5 * @sin(time_since_start * 0.0005), 1);
-            // gl.glTranslate3f(-0.5, 0, 0);
+            gl.glActiveTexture(gl.GL_TEXTURE0);
+            gl.glBindTexture(gl.GL_TEXTURE_2D, test_texture_handle);
+            gl.glMatrixMode(gl.GL_PROJECTION);
+            gl.glLoadIdentity();
+            gl.glMatrixMode(gl.GL_MODELVIEW);
+            gl.glLoadIdentity();
 
-            gl.glColor3f(1.0, 0.0, 0.0);
-            gl.glTexCoord2f(0.5 * 2, 0);
-            gl.glVertex3f(0, 1, @sin(time_since_start * 0.001) * 4);
+            gl.glBegin(gl.GL_QUADS);
 
-            gl.glColor3f(0.0, 1.0, 0.0);
-            gl.glTexCoord2f(0, 1 * 2);
-            gl.glVertex3f(-1, -1, @sin(time_since_start * 0.001) * 4);
+            gl.glTranslatef(0, 0, 0.1);
 
-            gl.glColor3f(0.0, 0.0, 1.0);
-            gl.glTexCoord2f(1 * 2, 1 * 2);
-            gl.glVertex3f(1, -1, @sin(time_since_start * 0.001) * 4);
-
-            gl.glColor3f(1.0, 0.0, 0.0);
             gl.glTexCoord2f(0, 0);
-            gl.glVertex2f(@sin(time_since_start * 0.001) * 2, 1);
+            gl.glVertex2f(0, 0);
 
-            gl.glColor3f(0.0, 1.0, 0.0);
             gl.glTexCoord2f(1, 0);
-            gl.glVertex2f(-1 + @sin(time_since_start * 0.001) * 2, -1);
+            gl.glVertex2f(1, 0);
 
-            gl.glColor3f(0.0, 0.0, 1.0);
             gl.glTexCoord2f(0, 1);
-            gl.glVertex2f(1 + @sin(time_since_start * 0.001) * 2, -1);
+            gl.glVertex2f(0, 1);
+
+            gl.glTexCoord2f(1, 1);
+            gl.glVertex2f(1, 1);
+
+            gl.glTranslatef(-1, -0.5, 0.1);
+
+            gl.glTexCoord2f(0, 0);
+            gl.glVertex2f(0, 0);
+
+            gl.glTexCoord2f(1, 0);
+            gl.glVertex2f(1, 0);
+
+            gl.glTexCoord2f(0, 1);
+            gl.glVertex2f(0, 1);
+
+            gl.glTexCoord2f(1, 1);
+            gl.glVertex2f(1, 1);
 
             gl.glEnd();
+
+            if (true) {
+                gl.glBindTexture(gl.GL_TEXTURE_2D, shambler_texture);
+
+                gl.glBegin(gl.GL_TRIANGLES);
+
+                const projection_matrix = matrix_math.perspectiveNonReversedZ(
+                    std.math.tau * 0.20,
+                    aspect_ratio,
+                    0.1,
+                    500,
+                );
+
+                gl.glMatrixMode(gl.GL_PROJECTION);
+                gl.glLoadIdentity();
+                gl.glLoadMatrix(@ptrCast(&matrix_math.transpose(projection_matrix)));
+                gl.glScalef(1, 1, -1);
+
+                gl.glMatrixMode(gl.GL_MODELVIEW);
+                gl.glLoadIdentity();
+                // gl.glScale3f(1, 1, 1);
+                // gl.glTranslate3f(@sin(time_since_start * 0.0005), 0, 0);
+
+                // gl.glScale3f(1, 0.5 * @sin(time_since_start * 0.0005), 1);
+
+                // gl.glTranslate3f(0, 0, @sin(time_since_start * 0.001) * 4);
+                gl.glTranslatef(@sin(time_since_start * 0.001) * 0, 0, 5.5 + @sin(time_since_start * 0.001));
+                gl.glRotatef(time_since_start * 0.0001 * 360, 0, 1, 0);
+
+                const uv_scale: f32 = 2 + @cos(time_since_start * 0.001);
+                // const uv_scale: f32 = 1;
+
+                // gl.glColor3f(1.0, 0.0, 0.0);
+                gl.glColor3f(1.0, 1.0, 1.0);
+                gl.glTexCoord2f(0.5 * uv_scale, 0);
+                gl.glVertex3f(0, 1, 0);
+
+                // gl.glColor3f(0.0, 1.0, 0.0);
+                gl.glColor3f(1.0, 1.0, 1.0);
+                gl.glTexCoord2f(0, 1 * uv_scale);
+                gl.glVertex3f(-1, -1, 0);
+
+                // gl.glColor3f(0.0, 0.0, 1.0);
+                gl.glColor3f(1.0, 1.0, 1.0);
+                gl.glTexCoord2f(1 * uv_scale, 1 * uv_scale);
+                gl.glVertex3f(1, -1, 0);
+
+                gl.glLoadIdentity();
+                gl.glTranslatef(0, 0, 1);
+                gl.glBindTexture(gl.GL_TEXTURE_2D, test_texture_handle);
+
+                // gl.glColor3f(1.0, 0.0, 0.0);
+                // gl.glTexCoord2f(0, 0);
+                // gl.glVertex2f(@sin(time_since_start * 0.001) * 2, 1);
+
+                // gl.glColor3f(0.0, 1.0, 0.0);
+                // gl.glTexCoord2f(1, 0);
+                // gl.glVertex2f(-1 + @sin(time_since_start * 0.001) * 2, -1);
+
+                // gl.glColor3f(0.0, 0.0, 1.0);
+                // gl.glTexCoord2f(0, 1);
+                // gl.glVertex2f(1 + @sin(time_since_start * 0.001) * 2, -1);
+
+                gl.glEnd();
+            }
 
             const raster_time_gl = std.time.nanoTimestamp();
             gl.glFlush();
@@ -170,7 +324,6 @@ pub fn main() !void {
                             const in_pixel_row: @Vector(4, u32) = target_start_vec[row];
 
                             out_pixel_row[0] = in_pixel_row;
-                            // out_pixel_row[0] = @splat(0xff_ff_00_00);
                         }
                     }
                 }
@@ -210,15 +363,40 @@ pub fn main() !void {
 
         if (use_gpu_for_scaling) {
             _ = sdl.SDL_UpdateTexture(target_texture, null, target_buffer_linear.ptr, render_target_width * @sizeOf(u32));
+            _ = sdl.SDL_RenderClear(renderer);
             _ = sdl.SDL_RenderTexture(renderer, target_texture, null, null);
             _ = sdl.SDL_RenderPresent(renderer);
         } else {
             _ = sdl.SDL_UpdateWindowSurface(window);
         }
+
+        {
+            var count: c_int = 0;
+            if (previous_keyboard_state != null) gpa.free(previous_keyboard_state.?);
+
+            previous_keyboard_state = sdl.SDL_GetKeyboardState(&count)[0..@intCast(count)];
+
+            previous_keyboard_state = try gpa.dupe(bool, previous_keyboard_state.?);
+        }
     }
 }
 
+///Returns true the first time the key is detected as down
+fn getKeyPressed(key: sdl.SDL_Scancode) bool {
+    var key_count: c_int = 0;
+
+    const keys = sdl.SDL_GetKeyboardState(&key_count)[0..@intCast(key_count)];
+
+    if (previous_keyboard_state == null) {
+        return keys[key];
+    }
+
+    return keys[key] and !previous_keyboard_state.?[key];
+}
+
+var previous_keyboard_state: ?[]const bool = null;
+
 const std = @import("std");
 const sdl = @import("sdl");
-const centralgpu = @import("root.zig");
+const centralgpu = @import("centralgpu");
 const gl = @import("gl.zig");

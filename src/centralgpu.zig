@@ -44,23 +44,48 @@ pub const ImageDescriptor = packed struct(u64) {
         nearest,
         bilinear,
     },
-    sampler_address_mode: enum(u1) {
+    sampler_address_mode: enum(u2) {
         repeat,
         clamp_to_edge,
+        clamp_to_border,
     },
-    _: u22 = 0,
+    ///Specifies how the border colour should be shifted
+    ///border_colour = 0xff_ff_ff_ff << (border_colour_shift_amount << 3)
+    border_colour_shift_amount: u3,
+    _: u18 = 0,
 };
 
-pub fn WarpRegister(comptime T: type) type {
-    const len = std.simd.suggestVectorLength(u32).?;
+const warp_register_len = std.simd.suggestVectorLength(u32).?;
 
-    return @Vector(len, T);
+pub fn WarpRegister(comptime T: type) type {
+    return @Vector(warp_register_len, T);
 }
 
 pub fn WarpVec2(comptime T: type) type {
     return struct {
         x: WarpRegister(T),
         y: WarpRegister(T),
+
+        pub inline fn neg(self: @This()) @This() {
+            return .{
+                .x = -self.x,
+                .y = -self.y,
+            };
+        }
+
+        pub inline fn add(left: @This(), right: @This()) @This() {
+            return .{
+                .x = left.x + right.x,
+                .y = left.y + right.y,
+            };
+        }
+
+        pub inline fn sub(left: @This(), right: @This()) @This() {
+            return .{
+                .x = left.x - right.x,
+                .y = left.y - right.y,
+            };
+        }
     };
 }
 
@@ -97,47 +122,128 @@ pub fn WarpVec4(comptime T: type) type {
         z: WarpRegister(T),
         w: WarpRegister(T),
 
-        pub fn xy(self: @This()) WarpVec2(T) {
-            return .{ .x = self.x, .y = self.y };
-        }
-
-        pub fn splat(value: WarpRegister(T)) @This() {
+        pub inline fn init(
+            values: [4]f32,
+        ) @This() {
             return .{
-                .x = value,
-                .y = value,
-                .z = value,
-                .w = value,
+                .x = @splat(values[0]),
+                .y = @splat(values[1]),
+                .z = @splat(values[2]),
+                .w = @splat(values[3]),
             };
         }
 
-        pub fn add(lhs: @This(), rhs: @This()) @This() {
+        pub inline fn neg(self: @This()) @This() {
             return .{
-                .x = lhs.x + rhs.x,
-                .y = lhs.y + rhs.y,
-                .z = lhs.z + rhs.z,
-                .w = lhs.w + rhs.w,
+                .x = -self.x,
+                .y = -self.y,
+                .z = -self.z,
+                .w = -self.w,
             };
         }
 
-        pub fn mul(lhs: @This(), rhs: @This()) @This() {
+        pub inline fn add(left: @This(), right: @This()) @This() {
             return .{
-                .x = lhs.x * rhs.x,
-                .y = lhs.y * rhs.y,
-                .z = lhs.z * rhs.z,
-                .w = lhs.w * rhs.w,
+                .x = left.x + right.x,
+                .y = left.y + right.y,
+                .z = left.z + right.z,
+                .w = left.w + right.w,
             };
+        }
+
+        pub inline fn sub(left: @This(), right: @This()) @This() {
+            return .{
+                .x = left.x - right.x,
+                .y = left.y - right.y,
+                .z = left.z - right.z,
+                .w = left.w - right.w,
+            };
+        }
+
+        pub inline fn hadamardProduct(left: @This(), right: @This()) @This() {
+            return .{
+                .x = left.x * right.x,
+                .y = left.y * right.y,
+                .z = left.z * right.z,
+                .w = left.w * right.w,
+            };
+        }
+
+        ///Fused hadamard-add: (a * b + c)
+        pub inline fn hadamardAdd(a: @This(), b: @This(), c: @This()) @This() {
+            return .{
+                .x = @mulAdd(WarpRegister(f32), a.x, b.x, c.x),
+                .y = @mulAdd(WarpRegister(f32), a.y, b.y, c.y),
+                .z = @mulAdd(WarpRegister(f32), a.z, b.z, c.z),
+                .w = @mulAdd(WarpRegister(f32), a.w, b.w, c.w),
+            };
+        }
+
+        pub inline fn scalarProduct(left: @This(), right: @This()) WarpRegister(T) {
+            const xx = left.x * right.x;
+            const yy = left.y * right.y;
+            const zz = left.z * right.z;
+            const ww = left.w * right.w;
+
+            return xx + yy + zz + ww;
+        }
+
+        pub inline fn scale(left: @This(), right: WarpRegister(T)) @This() {
+            return .{
+                .x = left.x * right,
+                .y = left.y * right,
+                .z = left.z * right,
+                .w = left.w * right,
+            };
+        }
+    };
+}
+
+pub fn Mat4x4(comptime T: type) type {
+    return struct {
+        rows: [4]WarpVec4(T) = .{
+            WarpVec4(T).init(.{ 1, 0, 0, 0 }),
+            WarpVec4(T).init(.{ 0, 1, 0, 0 }),
+            WarpVec4(T).init(.{ 0, 0, 1, 0 }),
+            WarpVec4(T).init(.{ 0, 0, 0, 1 }),
+        },
+
+        pub inline fn init(values: [4][4]T) @This() {
+            return .{
+                .rows = .{
+                    WarpVec4(T).init(values[0]),
+                    WarpVec4(T).init(values[1]),
+                    WarpVec4(T).init(values[2]),
+                    WarpVec4(T).init(values[3]),
+                },
+            };
+        }
+
+        pub inline fn mulByVec4(left: @This(), right: WarpVec4(T)) WarpVec4(T) {
+            const x_res = left.rows[0].scale(right.x);
+            const y_res = left.rows[1].scale(right.y);
+            const z_res = left.rows[2].scale(right.z);
+            const w_res = left.rows[3].scale(right.w);
+
+            var result: WarpVec4(T) = x_res;
+
+            result = result.add(y_res);
+            result = result.add(z_res);
+            result = result.add(w_res);
+
+            return result;
         }
     };
 }
 
 pub const WarpProjectedTriangle = struct {
     mask: WarpRegister(bool),
+    ///After projection w actual stores reciprocal w
     points: [3]WarpVec4(f32),
-    unclipped_points: [3]WarpVec4(f32),
 };
 
 pub const Uniforms = struct {
-    vertex_positions: []const [3]WarpVec3(f32),
+    vertex_positions: []const [3]WarpVec4(f32),
     vertex_colours: []const [3]u32,
     vertex_texture_coords: []const [3][2]f32,
 
@@ -160,38 +266,48 @@ pub fn processGeometry(
     triangle_id_start: usize,
     input_mask: WarpRegister(bool),
 ) WarpProjectedTriangle {
+    @setRuntimeSafety(false);
+
     const in_triangle = uniforms.vertex_positions[triangle_id_start / 8];
 
     var out_triangle: [3]WarpVec4(f32) = undefined;
     var out_mask = input_mask;
-
-    var cull_triangle: WarpRegister(bool) = @splat(true);
 
     for (0..3) |vertex_index| {
         out_triangle[vertex_index] = .{
             .x = in_triangle[vertex_index].x,
             .y = in_triangle[vertex_index].y,
             .z = in_triangle[vertex_index].z,
-            .w = in_triangle[vertex_index].z,
+            .w = in_triangle[vertex_index].w,
+            // .w = @splat(1),
         };
 
-        const vector_minus_one: WarpRegister(f32) = @splat(-1);
-        const vector_one: WarpRegister(f32) = @splat(1);
+        // out_mask = vectorBoolAnd(
+        //     out_mask,
+        //     vectorBoolAnd(
+        //         -out_triangle[vertex_index].w <= out_triangle[vertex_index].x,
+        //         out_triangle[vertex_index].x <= out_triangle[vertex_index].w,
+        //     ),
+        // );
 
-        cull_triangle = vectorBoolAnd(
-            cull_triangle,
-            vectorBoolOr(
-                out_triangle[vertex_index].x < vector_minus_one,
-                out_triangle[vertex_index].x > vector_one,
-            ),
+        // out_mask = vectorBoolAnd(
+        //     out_mask,
+        //     vectorBoolAnd(
+        //         -out_triangle[vertex_index].w <= out_triangle[vertex_index].y,
+        //         out_triangle[vertex_index].y <= out_triangle[vertex_index].w,
+        //     ),
+        // );
+
+        out_mask = out_mask;
+
+        out_mask = vectorBoolAnd(
+            out_mask,
+            out_triangle[vertex_index].z > -out_triangle[vertex_index].w,
         );
 
-        cull_triangle = vectorBoolAnd(
-            cull_triangle,
-            vectorBoolOr(
-                out_triangle[vertex_index].y < vector_minus_one,
-                out_triangle[vertex_index].y > vector_one,
-            ),
+        out_mask = vectorBoolAnd(
+            out_mask,
+            out_triangle[vertex_index].z <= out_triangle[vertex_index].w,
         );
 
         const reciprocal_w = @as(WarpRegister(f32), @splat(1)) / out_triangle[vertex_index].w;
@@ -199,6 +315,8 @@ pub fn processGeometry(
         out_triangle[vertex_index].x *= reciprocal_w;
         out_triangle[vertex_index].y *= reciprocal_w;
         out_triangle[vertex_index].z *= reciprocal_w;
+
+        out_triangle[vertex_index].w = reciprocal_w;
 
         out_triangle[vertex_index].x = @mulAdd(
             WarpRegister(f32),
@@ -215,12 +333,11 @@ pub fn processGeometry(
         );
     }
 
-    out_mask = vectorBoolAnd(out_mask, vectorBoolNot(cull_triangle));
+    // out_mask = vectorBoolAnd(out_mask, vectorBoolNot(cull_triangle));
 
     return .{
         .mask = out_mask,
         .points = out_triangle,
-        .unclipped_points = out_triangle,
     };
 }
 
@@ -233,6 +350,8 @@ pub const RasterState = struct {
     render_target: Image,
 };
 
+const clipless_raster = false;
+
 ///Rasterizer stage
 pub fn rasterize(
     raster_state: RasterState,
@@ -241,12 +360,24 @@ pub fn rasterize(
     in_projected_triangle: WarpProjectedTriangle,
 ) void {
     @setRuntimeSafety(false);
-    const projected_triangle = in_projected_triangle;
+    var projected_triangle = in_projected_triangle;
+
+    //clipless: clamp w away from zero
+    if (clipless_raster) {
+        const max_inv_w: WarpRegister(f32) = @splat(@sqrt(std.math.floatMax(f32)));
+
+        const w_lower_bound: WarpRegister(f32) = -max_inv_w;
+        const w_upper_bound: WarpRegister(f32) = max_inv_w;
+
+        inline for (0..3) |vertex| {
+            projected_triangle.points[vertex].w = @max(@min(projected_triangle.points[vertex].w, w_upper_bound), w_lower_bound);
+        }
+    }
 
     const triangle_area = edgeFunctionSimd(
-        projected_triangle.unclipped_points[0],
-        projected_triangle.unclipped_points[1],
-        projected_triangle.unclipped_points[2],
+        projected_triangle.points[0],
+        projected_triangle.points[1],
+        projected_triangle.points[2],
     );
     const triangle_area_reciprocal = @as(WarpRegister(f32), @splat(1)) / triangle_area;
 
@@ -262,19 +393,31 @@ pub fn rasterize(
     var triangle_max_x: WarpRegister(f32) = @splat(-std.math.inf(f32));
     var triangle_max_y: WarpRegister(f32) = @splat(-std.math.inf(f32));
 
-    for (projected_triangle.points) |point| {
-        triangle_min_x = @min(point.x, triangle_min_x);
-        triangle_min_y = @min(point.y, triangle_min_y);
+    if (clipless_raster) {
+        for (projected_triangle.points) |point| {
+            const w_sign: WarpRegister(bool) = std.math.signbit(point.w);
+            const inf_p: WarpRegister(f32) = @splat(1000.0);
+            const inf_n: WarpRegister(f32) = @splat(-1000.0);
+            _ = inf_n; // autofix
 
-        triangle_max_x = @max(point.x, triangle_max_x);
-        triangle_max_y = @max(point.y, triangle_max_y);
+            triangle_min_x = @select(f32, w_sign, point.x, inf_p);
+            triangle_min_y = @select(f32, w_sign, point.y, inf_p);
+        }
+    } else {
+        for (projected_triangle.points) |point| {
+            triangle_min_x = @min(point.x, triangle_min_x);
+            triangle_min_y = @min(point.y, triangle_min_y);
+
+            triangle_max_x = @max(point.x, triangle_max_x);
+            triangle_max_y = @max(point.y, triangle_max_y);
+        }
+
+        bounds_min_x = @max(bounds_min_x, triangle_min_x);
+        bounds_min_y = @max(bounds_min_y, triangle_min_y);
+
+        bounds_max_x = @min(bounds_max_x, triangle_max_x);
+        bounds_max_y = @min(bounds_max_y, triangle_max_y);
     }
-
-    bounds_min_x = @max(bounds_min_x, triangle_min_x);
-    bounds_min_y = @max(bounds_min_y, triangle_min_y);
-
-    bounds_max_x = @min(bounds_max_x, triangle_max_x);
-    bounds_max_y = @min(bounds_max_y, triangle_max_y);
 
     var start_x: WarpRegister(i32) = @intFromFloat(@floor(bounds_min_x));
     var start_y: WarpRegister(i32) = @intFromFloat(@floor(bounds_min_y));
@@ -323,8 +466,7 @@ pub fn rasterizeTriangle(
     end_x: i32,
     end_y: i32,
 ) void {
-    @setRuntimeSafety(true);
-    _ = triangle_index; // autofix
+    @setRuntimeSafety(false);
     const block_width = 4;
     const block_height = block_width;
 
@@ -336,18 +478,18 @@ pub fn rasterizeTriangle(
     const block_end_y = @divTrunc(end_y, block_height) + (@intFromBool(@rem(end_y, block_height) != 0));
 
     const unclipped_vert_0: WarpVec2(f32) = .{
-        .x = @splat(projected_triangle.unclipped_points[0].x[triangle_id]),
-        .y = @splat(projected_triangle.unclipped_points[0].y[triangle_id]),
+        .x = @splat(projected_triangle.points[0].x[triangle_id]),
+        .y = @splat(projected_triangle.points[0].y[triangle_id]),
     };
 
     const unclipped_vert_1: WarpVec2(f32) = .{
-        .x = @splat(projected_triangle.unclipped_points[1].x[triangle_id]),
-        .y = @splat(projected_triangle.unclipped_points[1].y[triangle_id]),
+        .x = @splat(projected_triangle.points[1].x[triangle_id]),
+        .y = @splat(projected_triangle.points[1].y[triangle_id]),
     };
 
     const unclipped_vert_2: WarpVec2(f32) = .{
-        .x = @splat(projected_triangle.unclipped_points[2].x[triangle_id]),
-        .y = @splat(projected_triangle.unclipped_points[2].y[triangle_id]),
+        .x = @splat(projected_triangle.points[2].x[triangle_id]),
+        .y = @splat(projected_triangle.points[2].y[triangle_id]),
     };
 
     //per primitive processing
@@ -366,6 +508,11 @@ pub fn rasterizeTriangle(
     const vertex_texcoord_v_0: WarpRegister(f32) = @splat(uniforms.vertex_texture_coords[triangle_id][0][1]);
     const vertex_texcoord_v_1: WarpRegister(f32) = @splat(uniforms.vertex_texture_coords[triangle_id][1][1]);
     const vertex_texcoord_v_2: WarpRegister(f32) = @splat(uniforms.vertex_texture_coords[triangle_id][2][1]);
+
+    //We store reciprocal w in the w of the projected triangle after processing
+    const vertex_recip_w_0: WarpRegister(f32) = @splat(projected_triangle.points[0].w[triangle_index]);
+    const vertex_recip_w_1: WarpRegister(f32) = @splat(projected_triangle.points[1].w[triangle_index]);
+    const vertex_recip_w_2: WarpRegister(f32) = @splat(projected_triangle.points[2].w[triangle_index]);
 
     const block_count_x = raster_state.render_target.width / block_width + @intFromBool(raster_state.render_target.width % block_width != 0);
 
@@ -439,6 +586,18 @@ pub fn rasterizeTriangle(
                 execution_mask &= @intFromBool(bary_1 <= @as(WarpRegister(f32), @splat(1)));
                 execution_mask &= @intFromBool(bary_2 <= @as(WarpRegister(f32), @splat(1)));
 
+                const fragment_recip_w = bary_0 * vertex_recip_w_0 + bary_1 * vertex_recip_w_1 + bary_2 * vertex_recip_w_2;
+
+                const fragment_w = @as(WarpRegister(f32), @splat(1)) / fragment_recip_w;
+
+                bary_0 *= vertex_recip_w_0;
+                bary_1 *= vertex_recip_w_1;
+                bary_2 *= vertex_recip_w_2;
+
+                bary_0 *= fragment_w;
+                bary_1 *= fragment_w;
+                bary_2 *= fragment_w;
+
                 if (@reduce(.Or, execution_mask) == 0) {
                     continue;
                 }
@@ -451,29 +610,41 @@ pub fn rasterizeTriangle(
                 const color_b = bary_0 * vertex_color_0.z + bary_1 * vertex_color_1.z + bary_2 * vertex_color_2.z;
                 const color_a = bary_0 * vertex_color_0.w + bary_1 * vertex_color_1.w + bary_2 * vertex_color_2.w;
 
-                const texture_sample = quadImageSample(
-                    execution_mask != @as(WarpRegister(u1), @splat(0)),
-                    @ptrCast(@alignCast(uniforms.image_base)),
-                    uniforms.image_descriptor,
-                    .{ .x = tex_u, .y = tex_v },
-                );
+                // const texture_sample = quadImageSample(
+                // execution_mask != @as(WarpRegister(u1), @splat(0)),
+                // @ptrCast(@alignCast(uniforms.image_base)),
+                // uniforms.image_descriptor,
+                // .{ .x = tex_u, .y = tex_v },
+                // );
 
                 const color: WarpVec4(f32) = .{ .x = color_r, .y = color_g, .z = color_b, .w = color_a };
-                _ = color; // autofix
                 // const color = packUnorm4x(.{ .x = tex_u, .y = tex_v, .z = @splat(0), .w = @splat(1) });
                 // const color = packUnorm4x(.{ .x = texture_sample.x, .y = texture_sample.y, .z = texture_sample.z, .w = @splat(1) });
 
-                var color_result: WarpVec4(f32) = texture_sample;
-
-                execution_mask &= ~(@intFromBool(texture_sample.x == @as(WarpRegister(f32), @splat(0))) &
-                    @intFromBool(texture_sample.y == @as(WarpRegister(f32), @splat(0))) &
-                    @intFromBool(texture_sample.z == @as(WarpRegister(f32), @splat(0))));
+                // var color_result: WarpVec4(f32) = texture_sample;
+                var color_result: WarpVec4(f32) = color;
 
                 color_result = color_result;
 
-                // color_result = .mul(color_result, color);
+                // color_result = .hadamardProduct(color_result, color);
+                color_result = color;
+
+                // execution_mask &= ~(@intFromBool(color_result.w == @as(WarpRegister(f32), @splat(0))));
+
+                color_result.x = @splat(@floatFromInt(triangle_id % 10));
+                color_result.x /= @splat(10);
+                color_result.y = @splat(@floatFromInt(triangle_id % 100));
+                color_result.y /= @splat(100);
+                color_result.z = @splat(1);
+                color_result.w = @splat(1);
+
+                color_result.x = tex_u;
+                color_result.y = tex_v;
+                color_result.z = @splat(0);
+                color_result.w = @splat(1);
 
                 const packed_color = packUnorm4x(color_result);
+                // const packed_color: WarpRegister(u32) = @splat(std.math.maxInt(u32));
 
                 maskedStore(
                     u32,
@@ -505,9 +676,9 @@ inline fn edgeFunctionSimd(
 pub fn packUnorm4x(
     values: WarpVec4(f32),
 ) WarpRegister(u32) {
-    const max_value: WarpRegister(f32) = @splat(std.math.maxInt(u8));
-
     @setRuntimeSafety(false);
+
+    const max_value: WarpRegister(f32) = @splat(std.math.maxInt(u8));
 
     const x_in: WarpRegister(i32) = @intFromFloat(values.x * max_value);
     const y_in: WarpRegister(i32) = @intFromFloat(values.y * max_value);
@@ -538,6 +709,8 @@ pub fn packUnorm4x(
 pub fn unpackUnorm4x(
     value: WarpRegister(u32),
 ) WarpVec4(f32) {
+    @setRuntimeSafety(false);
+
     var package: WarpRegister(u32) = value;
 
     package >>= @splat(8);
@@ -711,7 +884,7 @@ pub fn quadReadNeigbhourY(warp_value: WarpRegister(f32)) WarpRegister(f32) {
     return shuffled;
 }
 
-pub fn quadImageSample(
+pub inline fn quadImageSample(
     execution_mask: WarpRegister(bool),
     base: [*]const u32,
     descriptor: ImageDescriptor,
@@ -727,7 +900,7 @@ pub fn quadImageSample(
     );
 }
 
-pub fn imageSampleDerivative(
+pub inline fn imageSampleDerivative(
     execution_mask: WarpRegister(bool),
     base: [*]const u32,
     descriptor: ImageDescriptor,
@@ -735,6 +908,8 @@ pub fn imageSampleDerivative(
     u_derivative: WarpVec2(f32),
     v_derivative: WarpVec2(f32),
 ) WarpVec4(f32) {
+    @setRuntimeSafety(false);
+
     const texture_width: WarpRegister(f32) = @splat(@floatFromInt(@as(u32, 1) << @as(u5, descriptor.width_log2)));
     const texture_height: WarpRegister(f32) = @splat(@floatFromInt(@as(u32, 1) << @as(u5, descriptor.height_log2)));
 
@@ -750,30 +925,202 @@ pub fn imageSampleDerivative(
     const mip_level = @log2(rho_factor);
 
     if (mip_level[0] - 3 >= 0) {
-        return .{
-            .x = rho_factor,
-            .y = @splat(0),
-            .z = @splat(0),
-            .w = @splat(1),
-        };
+        // return .{
+        // .x = mip_level / @as(WarpRegister(f32), @splat(10.0)),
+        // .y = @splat(0),
+        // .z = @splat(0),
+        // .w = @splat(1),
+        // };
     }
 
-    return imageLoad(execution_mask, base, descriptor, uv);
+    switch (descriptor.sampler_filter) {
+        .nearest => return imageSampleNearest(execution_mask, base, descriptor, uv),
+        .bilinear => return imageSampleBilinear(execution_mask, base, descriptor, uv),
+    }
 }
 
-pub fn imageLoad(
+pub inline fn imageSampleBilinear(
+    execution_mask: WarpRegister(bool),
+    ///Base address from which the descriptor loads
+    base: [*]const u32,
+    descriptor: ImageDescriptor,
+    uv: WarpVec2(f32),
+) WarpVec4(f32) {
+    @setRuntimeSafety(false);
+
+    const u_scale: WarpRegister(f32) = @splat(@floatFromInt((@as(u32, 1) << @as(u5, descriptor.width_log2)) - 1));
+    const v_scale: WarpRegister(f32) = @splat(@floatFromInt((@as(u32, 1) << @as(u5, descriptor.height_log2)) - 1));
+
+    const inv_u_scale = @as(WarpRegister(f32), @splat(1)) / u_scale;
+    const inv_v_scale = @as(WarpRegister(f32), @splat(1)) / v_scale;
+
+    const half: WarpRegister(f32) = @splat(0.5);
+    const one_and_half: WarpRegister(f32) = @splat(1.5);
+    _ = one_and_half; // autofix
+
+    const sample_loc_0_float = imageSamplerAddressFloat(
+        descriptor,
+        // uv.add(.{ .x = half * inv_u_scale, .y = half * inv_v_scale }),
+        uv,
+    );
+
+    const sample_loc_0: WarpVec2(i32) = .{
+        .x = @intFromFloat(@floor(sample_loc_0_float.x)),
+        .y = @intFromFloat(@floor(sample_loc_0_float.y)),
+    };
+    const sample_loc_1 = imageSamplerAddress(
+        descriptor,
+        // uv.add(.{ .x = one_and_half * inv_u_scale, .y = half * inv_v_scale }),
+        uv.add(.{ .x = half * inv_u_scale, .y = @splat(0) }),
+    );
+    const sample_loc_2 = imageSamplerAddress(
+        descriptor,
+        // uv.add(.{ .x = half * inv_u_scale, .y = one_and_half * inv_v_scale }),
+        uv.add(.{ .x = @splat(0), .y = half * inv_v_scale }),
+    );
+    const sample_loc_3 = imageSamplerAddress(
+        descriptor,
+        // uv.add(.{ .x = one_and_half * inv_u_scale, .y = one_and_half * inv_v_scale }),
+        uv.add(.{ .x = half * inv_u_scale, .y = half * inv_v_scale }),
+    );
+
+    const texel_point_x: WarpRegister(i32) = @intFromFloat(@floor(sample_loc_0_float.x));
+    _ = texel_point_x; // autofix
+    const texel_point_y: WarpRegister(i32) = @intFromFloat(@floor(sample_loc_0_float.y));
+    _ = texel_point_y; // autofix
+    const texel_point_offset_x = sample_loc_0_float.x - @floor(sample_loc_0_float.x);
+    const texel_point_offset_y = sample_loc_0_float.y - @floor(sample_loc_0_float.y);
+
+    const texel_0 = imageLoad(
+        execution_mask,
+        base,
+        descriptor,
+        sample_loc_0,
+    );
+    const texel_1 = imageLoad(
+        execution_mask,
+        base,
+        descriptor,
+        // .{
+        // .x = texel_point_x + @as(WarpRegister(i32), @splat(1)),
+        // .y = texel_point_y + @as(WarpRegister(i32), @splat(0)),
+        // },
+        sample_loc_1,
+    );
+    const texel_2 = imageLoad(
+        execution_mask,
+        base,
+        descriptor,
+        // .{
+        // .x = texel_point_x + @as(WarpRegister(i32), @splat(0)),
+        // .y = texel_point_y + @as(WarpRegister(i32), @splat(1)),
+        // },
+        sample_loc_2,
+    );
+    const texel_3 = imageLoad(
+        execution_mask,
+        base,
+        descriptor,
+        // .{
+        // .x = texel_point_x + @as(WarpRegister(i32), @splat(1)),
+        // .y = texel_point_y + @as(WarpRegister(i32), @splat(1)),
+        // },
+        sample_loc_3,
+    );
+
+    const pixel_0 = unpackUnorm4x(texel_0);
+    const pixel_1 = unpackUnorm4x(texel_1);
+    const pixel_2 = unpackUnorm4x(texel_2);
+    const pixel_3 = unpackUnorm4x(texel_3);
+
+    const vector_one = WarpVec4(f32){ .x = @splat(1), .y = @splat(1), .z = @splat(1), .w = @splat(1) };
+
+    const offset_x = WarpVec4(f32){
+        .x = texel_point_offset_x,
+        .y = texel_point_offset_x,
+        .z = texel_point_offset_x,
+        .w = texel_point_offset_x,
+    };
+
+    const offset_y = WarpVec4(f32){
+        .x = texel_point_offset_y,
+        .y = texel_point_offset_y,
+        .z = texel_point_offset_y,
+        .w = texel_point_offset_y,
+    };
+
+    const pixel_tx = pixel_1.hadamardAdd(offset_x, pixel_0.hadamardProduct(vector_one.sub(offset_x)));
+    const pixel_bx = pixel_3.hadamardAdd(offset_x, pixel_2.hadamardProduct(vector_one.sub(offset_x)));
+    const pixel_ty = pixel_bx.hadamardAdd(offset_y, pixel_tx.hadamardProduct(vector_one.sub(offset_y)));
+
+    return pixel_ty;
+}
+
+pub inline fn imageSampleNearest(
+    execution_mask: WarpRegister(bool),
+    ///Base address from which the descriptor loads
+    base: [*]const u32,
+    descriptor: ImageDescriptor,
+    uv: WarpVec2(f32),
+) WarpVec4(f32) {
+    @setRuntimeSafety(false);
+
+    const texel_location = imageSamplerAddress(descriptor, uv);
+
+    const sample_packed = imageLoad(
+        execution_mask,
+        base,
+        descriptor,
+        texel_location,
+    );
+    const sample = unpackUnorm4x(sample_packed);
+    return sample;
+}
+
+pub inline fn imageLoad(
     execution_mask: WarpRegister(bool),
     ///Base address from which the descriptor loads
     base: [*]const u32,
     descriptor: ImageDescriptor,
     ///Image coordinates
-    uv: WarpVec2(f32),
-) WarpVec4(f32) {
+    physical_position: WarpVec2(i32),
+) WarpRegister(u32) {
     @setRuntimeSafety(false);
 
-    //idx = x + y * width
-    const u_scale: WarpRegister(f32) = @splat(@floatFromInt((@as(u32, 1) << @as(u5, descriptor.width_log2)) - 1));
-    const v_scale: WarpRegister(f32) = @splat(@floatFromInt((@as(u32, 1) << @as(u5, descriptor.height_log2)) - 1));
+    const pixel_address = imageAddress(descriptor, physical_position.x, physical_position.y);
+
+    //0: opaque white
+    //2: cyan
+    //3: ...
+    //4: transparent black
+
+    const border_colour: WarpRegister(u32) = @splat(@truncate(@as(usize, 0xff_ff_ff_ff) << (@as(u6, descriptor.border_colour_shift_amount) << 3)));
+
+    var actual_mask = execution_mask;
+
+    const min_x: WarpRegister(i32) = @splat(0);
+    const min_y: WarpRegister(i32) = @splat(0);
+
+    const width: WarpRegister(i32) = @splat(@as(i32, 1) << @as(u5, descriptor.width_log2));
+    const height: WarpRegister(i32) = @splat(@as(i32, 1) << @as(u5, descriptor.height_log2));
+
+    actual_mask = vectorBoolAnd(actual_mask, physical_position.x >= min_x);
+    actual_mask = vectorBoolAnd(actual_mask, physical_position.y >= min_y);
+    actual_mask = vectorBoolAnd(actual_mask, physical_position.x < width);
+    actual_mask = vectorBoolAnd(actual_mask, physical_position.y < height);
+
+    const sample_packed = maskedGather(u32, actual_mask, base, @intCast(pixel_address));
+
+    return @select(u32, actual_mask, sample_packed, border_colour);
+}
+
+///Returns the physical image coordinates for the normalized sampler coordinates
+pub inline fn imageSamplerAddressFloat(
+    descriptor: ImageDescriptor,
+    ///Normalized image coordinates
+    uv: WarpVec2(f32),
+) WarpVec2(f32) {
+    @setRuntimeSafety(false);
 
     //Handle wrapping
     var u: WarpRegister(f32) = uv.x;
@@ -788,30 +1135,43 @@ pub fn imageLoad(
             u = @max(@min(u, @as(WarpRegister(f32), @splat(1))), @as(WarpRegister(f32), @splat(0)));
             v = @max(@min(v, @as(WarpRegister(f32), @splat(1))), @as(WarpRegister(f32), @splat(0)));
         },
+        .clamp_to_border => {},
     }
+
+    const u_scale: WarpRegister(f32) = @splat(@floatFromInt((@as(u32, 1) << @as(u5, descriptor.width_log2)) - 1));
+    const v_scale: WarpRegister(f32) = @splat(@floatFromInt((@as(u32, 1) << @as(u5, descriptor.height_log2)) - 1));
 
     const image_x_float: WarpRegister(f32) = u * u_scale;
     const image_y_float: WarpRegister(f32) = v * v_scale;
 
-    const image_x: WarpRegister(i32) = @intFromFloat(@floor(image_x_float));
-    const image_y: WarpRegister(i32) = @intFromFloat(@floor(image_y_float));
+    return .{ .x = image_x_float, .y = image_y_float };
+}
 
-    const pixel_address = imageAddress(descriptor, image_x, image_y);
+///Returns the physical image coordinates for the normalized sampler coordinates
+pub inline fn imageSamplerAddress(
+    descriptor: ImageDescriptor,
+    ///Normalized image coordinates
+    uv: WarpVec2(f32),
+) WarpVec2(i32) {
+    @setRuntimeSafety(false);
 
-    const sample_packed = maskedGather(u32, execution_mask, base, @intCast(pixel_address));
+    const half: WarpRegister(f32) = @splat(0.5);
 
-    var sample = unpackUnorm4x(sample_packed);
+    const u_scale: WarpRegister(f32) = @splat(@floatFromInt((@as(u32, 1) << @as(u5, descriptor.width_log2)) - 1));
+    const v_scale: WarpRegister(f32) = @splat(@floatFromInt((@as(u32, 1) << @as(u5, descriptor.height_log2)) - 1));
 
-    var pixel_address_float: WarpRegister(f32) = @floatFromInt(pixel_address);
+    const inv_u_scale = @as(WarpRegister(f32), @splat(1)) / u_scale;
+    const inv_v_scale = @as(WarpRegister(f32), @splat(1)) / v_scale;
 
-    pixel_address_float /= (u_scale + @as(WarpRegister(f32), @splat(1))) * (v_scale + @as(WarpRegister(f32), @splat(1)));
+    const scaled_uv = imageSamplerAddressFloat(descriptor, .{
+        .x = uv.x + half * inv_u_scale,
+        .y = uv.y + half * inv_v_scale,
+    });
 
-    // sample.x = pixel_address_float;
-    // sample.y = pixel_address_float;
-    // sample.z = pixel_address_float;
-    sample = sample;
+    const image_x: WarpRegister(i32) = @intFromFloat(@floor(scaled_uv.x));
+    const image_y: WarpRegister(i32) = @intFromFloat(@floor(scaled_uv.y));
 
-    return sample;
+    return .{ .x = image_x, .y = image_y };
 }
 
 ///Computes the address of a pixel relative to the image level base from its x and y coordinates
