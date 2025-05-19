@@ -16,12 +16,23 @@ export fn glGetString(name: i32) callconv(.c) [*:0]const u8 {
 
     if (centralgpu_gl.current_context == null) {
         centralgpu_gl.current_context = gpa.create(centralgpu_gl.Context) catch @panic("oom");
-        const target_buf = gpa.alloc(centralgpu.Rgba32, 800 * 600) catch @panic("oom");
+
+        const target_width = 800;
+        const target_height = 600;
+
+        const target_buf = gpa.alloc(centralgpu.Rgba32, target_width * target_height) catch @panic("oom");
 
         centralgpu_gl.current_context.?.* = .{
             .gpa = gpa,
-            .bound_render_target = .{ .pixel_ptr = target_buf.ptr, .width = 800, .height = 600 },
+            .bound_render_target = .{ .pixel_ptr = target_buf.ptr, .width = target_width, .height = target_height },
+            .depth_image = gpa.alloc(f32, target_width * target_height) catch @panic("oom"),
             .flush_callback = &glFlushCallback,
+            .viewport = .{
+                .x = 0,
+                .y = 0,
+                .width = @intCast(target_width),
+                .height = @intCast(target_height),
+            },
         };
 
         initWayland() catch |e| {
@@ -37,7 +48,7 @@ export fn glGetString(name: i32) callconv(.c) [*:0]const u8 {
             return "CENTRAL_GPU_RASTER";
         },
         gl_c.GL_VERSION => {
-            return "0.0.0";
+            return "1.3.0";
         },
         gl_c.GL_EXTENSIONS => {
             return "";
