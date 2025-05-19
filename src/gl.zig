@@ -3,12 +3,15 @@
 pub const Context = struct {
     gpa: std.mem.Allocator,
     bound_render_target: centralgpu.Image = undefined,
+    depth_image: []f32,
 
-    clear_color: u32 = 0xff_00_00_00,
     viewport: struct { x: i32, y: i32, width: isize, height: isize } = undefined,
     scissor: struct { x: i32, y: i32, width: isize, height: isize } = undefined,
 
+    clear_color: u32 = 0xff_00_00_00,
+    clear_depth: f32 = 1,
     should_clear_color_attachment: bool = false,
+    should_clear_depth_attachment: bool = false,
 
     modelview_matrix_stack: [8][16]f32 = [_][16]f32{.{
         1, 0, 0, 0,
@@ -39,6 +42,8 @@ pub const Context = struct {
     textures: std.ArrayListUnmanaged(struct {
         texture_data: []centralgpu.Rgba32,
         descriptor: centralgpu.ImageDescriptor,
+        internal_format: i32,
+        width: u32,
     }) = .empty,
     texture_binding: [4]u32 = @splat(0),
     ///Maps from GL_TEXTURE_0..80
@@ -57,6 +62,16 @@ pub const Context = struct {
     }) = .empty,
 
     draw_commands: std.ArrayListUnmanaged(DrawCommandState) = .empty,
+
+    //Draw state
+    enable_texturing: bool = true,
+    enable_alpha_test: bool = false,
+    enable_scissor_test: bool = false,
+    enable_depth_test: bool = false,
+    enable_depth_write: bool = true,
+
+    depth_min: f32 = 0,
+    depth_max: f32 = 1,
 
     has_begun: bool = false,
     primitive_mode: enum {
@@ -79,6 +94,28 @@ const DrawCommandState = struct {
 
     image_base: [*]const u8,
     image_descriptor: centralgpu.ImageDescriptor,
+
+    flags: Flags,
+
+    scissor_x: i32,
+    scissor_y: i32,
+    scissor_width: i32,
+    scissor_height: i32,
+
+    viewport_x: i32,
+    viewport_y: i32,
+    viewport_width: i32,
+    viewport_height: i32,
+    depth_min: f32,
+    depth_max: f32,
+
+    pub const Flags = packed struct(u8) {
+        enable_alpha_test: bool,
+        enable_scissor_test: bool,
+        enable_depth_test: bool,
+        enable_depth_write: bool,
+        _: u4,
+    };
 };
 
 pub var current_context: ?*Context = null;
@@ -94,6 +131,16 @@ pub export fn glClear(flags: u32) callconv(.c) void {
 
     if (flags & GL_COLOR_BUFFER_BIT != 0) {
         context.should_clear_color_attachment = true;
+
+        if (context.draw_commands.items.len != 0) {
+            // log.err("unflushed commands: {}", .{context.draw_commands.items.len});
+
+            // @panic("");
+        }
+    }
+
+    if (flags & GL_DEPTH_BUFFER_BIT != 0) {
+        context.should_clear_depth_attachment = true;
     }
 }
 
@@ -112,12 +159,21 @@ pub export fn glDepthRange(
     near_val: f64,
     far_val: f64,
 ) callconv(.c) void {
-    log.info("glDepthRange: near: {}, far: {}", .{ near_val, far_val });
+    const context = current_context.?;
+
+    context.depth_min = @floatCast(near_val);
+    context.depth_max = @floatCast(far_val);
 }
 
 pub export fn glDepthFunc() callconv(.c) void {}
 
-pub export fn glDepthMask() callconv(.c) void {}
+pub export fn glDepthMask(
+    flag: bool,
+) callconv(.c) void {
+    const context = current_context.?;
+
+    context.enable_depth_write = flag;
+}
 
 pub export fn glGetIntegerv(
     pname: i32,
@@ -148,69 +204,117 @@ pub export fn glScissor(x: i32, y: i32, w: isize, h: isize) callconv(.c) void {
     };
 }
 
-pub export fn glTexSubImage2D() void {}
+pub export fn glTexSubImage2D(
+    target: i32,
+    level: i32,
+    x_offset: i32,
+    y_offset: i32,
+    width: isize,
+    height: isize,
+    format: i32,
+    _type: i32,
+    data: *const anyopaque,
+) callconv(.c) void {
+    _ = level; // autofix
+    _ = format; // autofix
+    _ = _type; // autofix
+
+    const context = current_context.?;
+
+    if (target != GL_TEXTURE_2D) {
+        @panic("only GL_TEXTURE_2D is supported");
+    }
+
+    const texture = &context.textures.items[context.texture_binding[@intCast(target - GL_TEXTURE_2D)] - 1];
+
+    const component_count: usize = @intCast(texture.internal_format);
+
+    const dest_data_ptr: [*]centralgpu.Rgba32 = texture.texture_data.ptr;
+    const source_data_ptr: [*]const u8 = @ptrCast(data);
+
+    var y: usize = @intCast(y_offset);
+
+    while (y < height) : (y += 1) {
+        var x: usize = @intCast(x_offset);
+
+        while (x < width) : (x += 1) {
+            const src_index = y * @as(usize, @intCast(width)) + x;
+            const index = centralgpu.mortonEncode(@splat(@intCast(x)), @splat(@intCast(y)))[0];
+
+            dest_data_ptr[index] = .{
+                .r = source_data_ptr[src_index * component_count + 0],
+                .g = source_data_ptr[src_index * component_count + 1],
+                .b = source_data_ptr[src_index * component_count + 2],
+                .a = if (component_count < 4) 255 else source_data_ptr[src_index * component_count + 3],
+            };
+        }
+    }
+}
 
 pub export fn glTexImage2D(
     target: i32,
     level: i32,
-    components: i32,
+    internalFormat: i32,
     width: isize,
     height: isize,
     border: i32,
     format: i32,
     _type: i32,
-    data: *const anyopaque,
+    data: ?*const anyopaque,
 ) callconv(.c) void {
-    _ = components; // autofix
-    _ = format; // autofix
-    _ = _type; // autofix
     const context = current_context.?;
+
+    if (target != GL_TEXTURE_2D) {
+        @panic("only GL_TEXTURE_2D is supported");
+    }
+
     const texture = &context.textures.items[context.texture_binding[@intCast(target - GL_TEXTURE_2D)] - 1];
 
-    // std.debug.assert(std.math.isPowerOfTwo(width));
-    // std.debug.assert(std.math.isPowerOfTwo(height));
+    texture.internal_format = internalFormat;
+    texture.width = @intCast(width);
+
+    log.info("components = {}", .{internalFormat});
+    log.info("format = {}", .{format});
+
+    if (internalFormat < 3 or internalFormat > 4) {
+        @panic("internalFormat out of range");
+    }
+
+    if (_type != GL_UNSIGNED_BYTE) {
+        @panic("type out of range");
+    }
+
+    if (format != GL_RGBA) {
+        @panic("component type not supported");
+    }
+
+    std.debug.assert(std.math.isPowerOfTwo(width));
+    std.debug.assert(std.math.isPowerOfTwo(height));
 
     const padded_width = centralgpu.computeTargetPaddedSize(@intCast(width));
     const padded_height = centralgpu.computeTargetPaddedSize(@intCast(height));
 
     const dest_data_size: usize = @intCast(padded_width * padded_height * @sizeOf(u32));
 
-    const src_data_size: usize = @intCast(width * height * 3);
-
     const image_data = std.heap.page_allocator.alloc(centralgpu.Rgba32, dest_data_size) catch @panic("");
-
-    const source_data_ptr: [*]const u8 = @ptrCast(data);
-    const source_data: []const u8 = source_data_ptr[0..src_data_size];
-
-    var y: usize = 0;
-
-    while (y < height) : (y += 1) {
-        var x: usize = 0;
-
-        while (x < width) : (x += 1) {
-            const src_index = x + y * @as(usize, @intCast(width));
-            const index = centralgpu.mortonEncode(@splat(@intCast(x)), @splat(@intCast(y)))[0];
-
-            image_data[index] = .{
-                .r = source_data[src_index * 3 + 0],
-                .g = source_data[src_index * 3 + 1],
-                .b = source_data[src_index * 3 + 2],
-                .a = 255,
-            };
-        }
-    }
 
     texture.texture_data = image_data;
     texture.descriptor = .{
         .rel_ptr = 0,
         .width_log2 = @intCast(std.math.log2_int(usize, @intCast(width))),
         .height_log2 = @intCast(std.math.log2_int(usize, @intCast(height))),
+        // .sampler_filter = .bilinear,
         .sampler_filter = .nearest,
         .sampler_address_mode = .repeat,
         .border_colour_shift_amount = 4,
     };
 
-    _ = level; // autofix
+    if (data != null) {
+        glTexSubImage2D(target, level, 0, 0, width, height, format, _type, data.?);
+    } else {
+        @memset(image_data, .{ .r = 0, .g = 0, .b = 0, .a = 0 });
+    }
+
     _ = border; // autofix
 }
 
@@ -224,15 +328,19 @@ pub export fn glCopyTexSubImage2D(
     width: isize,
     height: isize,
 ) void {
-    _ = target; // autofix
-    _ = level; // autofix
-    _ = x_offset; // autofix
-    _ = y_offset; // autofix
     _ = x; // autofix
     _ = y; // autofix
-    _ = width; // autofix
-    _ = height; // autofix
 
+    log.info("glCopyTexSubImage2D: target: {}, level: {} x: {}, y: {}, w: {}, h: {}", .{
+        target,
+        level,
+        x_offset,
+        y_offset,
+        width,
+        height,
+    });
+
+    // @panic("glCopyTexSubImage2D");
 }
 
 pub export fn glGenTextures(
@@ -254,9 +362,17 @@ pub export fn glDeleteTextures(
     n: isize,
     textures: [*c]u32,
 ) callconv(.c) void {
-    _ = n; // autofix
-    _ = textures; // autofix
     //TODO: free texture memory
+
+    const context = current_context.?;
+
+    for (0..@intCast(n)) |k| {
+        const texture_handle = textures[k];
+        const texture = &context.textures.items[texture_handle - 1];
+
+        //TODO: check that data has actually been allocated
+        context.gpa.free(texture.texture_data);
+    }
 }
 
 pub export fn glActiveTexture(
@@ -288,11 +404,34 @@ pub export fn glBindTexture(
 pub export fn glTexParameteri(
     target: i32,
     pname: i32,
-    params: i32,
+    param: i32,
 ) callconv(.c) void {
-    _ = target; // autofix
-    _ = pname; // autofix
-    _ = params; // autofix
+    const context = current_context.?;
+    const texture = &context.textures.items[context.texture_binding[@intCast(target - GL_TEXTURE_2D)] - 1];
+
+    switch (pname) {
+        GL_TEXTURE_MIN_FILTER,
+        GL_TEXTURE_MAG_FILTER,
+        => {
+            switch (param) {
+                GL_NEAREST,
+                GL_NEAREST_MIPMAP_LINEAR,
+                GL_NEAREST_MIPMAP_NEAREST,
+                => {
+                    texture.descriptor.sampler_filter = .nearest;
+                },
+                GL_LINEAR,
+                GL_LINEAR_MIPMAP_NEAREST,
+                GL_LINEAR_MIPMAP_LINEAR,
+                => {
+                    texture.descriptor.sampler_filter = .bilinear;
+                    texture.descriptor.sampler_filter = .nearest;
+                },
+                else => {},
+            }
+        },
+        else => {},
+    }
 }
 
 pub export fn glGetTexParameteriv(
@@ -303,6 +442,7 @@ pub export fn glGetTexParameteriv(
     _ = target; // autofix
     _ = pname; // autofix
     _ = params; // autofix
+
 }
 
 pub export fn glTexParameterf(
@@ -365,10 +505,9 @@ pub export fn glBegin(flags: u32) callconv(.c) void {
     context.has_begun = true;
 
     const need_new_command = context.draw_commands.items.len == 0 or new_polygon_mode != previous_polygon_mode;
+    _ = need_new_command; // autofix
 
-    if (need_new_command) {
-        startCommand(context);
-    }
+    startCommand(context);
 
     context.primitive_mode = new_polygon_mode;
 }
@@ -387,32 +526,75 @@ pub export fn glEnd() callconv(.c) void {
 
 fn startCommand(context: *Context) void {
     if (!context.has_begun) {
-        return;
+        // return;
     }
 
     const command = context.draw_commands.addOne(context.gpa) catch @panic("oom");
 
     const triangle_id_offset: usize = 0;
 
+    if (context.draw_commands.items.len == 1) {
+        if (context.triangle_count != 0) {
+            @panic("context.triangle_count != 0");
+        }
+    }
+
+    if (context.triangle_count % 8 != 0) {
+        const bump_forward = 8 - @rem(context.triangle_count, 8);
+
+        context.triangle_count += bump_forward;
+
+        _ = context.triangle_colors.addManyAsSlice(context.gpa, bump_forward) catch @panic("oom");
+        _ = context.triangle_tex_coords.addManyAsSlice(context.gpa, bump_forward) catch @panic("oom");
+    }
+
     command.triangle_id_start = @intCast(context.triangle_count + triangle_id_offset);
     command.triangle_count = 0;
 
     command.scratch_vertex_start = @intCast(context.vertex_scratch.len);
-    command.scratch_vertex_end = command.scratch_vertex_start;
+    command.scratch_vertex_end = 0;
 
-    if (context.texture_units[context.texture_unit_active] != 0) {
-        const active_texture = &context.textures.items[context.texture_units[context.texture_unit_active] - 1];
+    const texture_unit = context.texture_unit_active;
+
+    const texture_handle = context.texture_units[texture_unit];
+    // const texture_handle: u32 = 3;
+
+    if (texture_handle != 0) {
+        const active_texture = &context.textures.items[texture_handle - 1];
 
         command.image_base = @ptrCast(active_texture.texture_data.ptr);
         command.image_descriptor = active_texture.descriptor;
     } else {
         //TODO: handle binding texture 0
+        command.image_descriptor.rel_ptr = -1;
     }
+
+    if (context.enable_texturing == false) {
+        command.image_descriptor.rel_ptr = -1;
+    }
+
+    command.flags.enable_alpha_test = context.enable_alpha_test;
+    command.flags.enable_scissor_test = context.enable_scissor_test;
+    command.flags.enable_depth_test = context.enable_depth_test;
+    command.flags.enable_depth_write = context.enable_depth_write;
+
+    command.scissor_x = context.scissor.x;
+    command.scissor_y = context.scissor.y;
+    command.scissor_width = @truncate(context.scissor.width);
+    command.scissor_height = @truncate(context.scissor.height);
+
+    command.depth_min = context.depth_min;
+    command.depth_max = context.depth_max;
+
+    command.viewport_x = @intCast(context.viewport.x);
+    command.viewport_y = @intCast(context.viewport.y);
+    command.viewport_width = @intCast(context.viewport.width);
+    command.viewport_height = @intCast(context.viewport.height);
 }
 
 fn endCommand(context: *Context) void {
     if (!context.has_begun) {
-        return;
+        // return;
     }
 
     if (context.draw_commands.items.len == 0) {
@@ -451,6 +633,10 @@ fn endCommand(context: *Context) void {
         .polygon => {
             triangle_count = command_scratch_vertex_count - 2;
         },
+    }
+
+    if (command_scratch_vertex_count < 3) {
+        triangle_count = 0;
     }
 
     last_command.triangle_count = @intCast(triangle_count);
@@ -507,15 +693,56 @@ pub export fn glPolygonMode() callconv(.c) void {}
 
 pub export fn glShadeModel() callconv(.c) void {}
 
-pub export fn glAlphaFunc() callconv(.c) void {}
+pub export fn glAlphaFunc(func: i32, ref: f32) callconv(.c) void {
+    std.log.info("func: {}, ref: {}", .{ func, ref });
+}
 
 pub export fn glBlendFunc() callconv(.c) void {}
 
 pub export fn glHint() callconv(.c) void {}
 
-pub export fn glEnable() callconv(.c) void {}
+pub export fn glEnable(cap: i32) callconv(.c) void {
+    const context = current_context.?;
 
-pub export fn glDisable() callconv(.c) void {}
+    switch (cap) {
+        GL_TEXTURE_2D => {
+            context.enable_texturing = true;
+        },
+        GL_ALPHA_TEST => {
+            context.enable_alpha_test = true;
+        },
+        GL_SCISSOR_TEST => {
+            context.enable_scissor_test = true;
+        },
+        GL_DEPTH_TEST => {
+            context.enable_depth_test = true;
+        },
+        GL_STENCIL_TEST => {
+            @panic("glEnable: Stencil test not supported");
+        },
+        else => {},
+    }
+}
+
+pub export fn glDisable(cap: i32) callconv(.c) void {
+    const context = current_context.?;
+
+    switch (cap) {
+        GL_TEXTURE_2D => {
+            context.enable_texturing = false;
+        },
+        GL_ALPHA_TEST => {
+            context.enable_alpha_test = false;
+        },
+        GL_SCISSOR_TEST => {
+            context.enable_scissor_test = false;
+        },
+        GL_DEPTH_TEST => {
+            context.enable_depth_test = false;
+        },
+        else => {},
+    }
+}
 
 pub export fn glTexEnvf() callconv(.c) void {}
 
@@ -523,7 +750,7 @@ pub export fn glRotatef(angle_degrees: f32, _x: f32, _y: f32, _z: f32) callconv(
     const angle = (angle_degrees * std.math.tau) / 360.0;
 
     const cos_angle = @cos(angle * 0.5);
-    const sin_angle = @sin(angle * 0.5);
+    const sin_angle = @sin(-angle * 0.5);
 
     if (false) {
         const mag = @sqrt(_x * _x + _y * _y + _z * _z);
@@ -796,8 +1023,8 @@ pub export fn glOrtho(
         0,                  0,                  0,                         1,
     };
 
-    glMultMatrixf(&ortho_matrix);
-    // glMultTransposeMatrixf(&ortho_matrix);
+    // glMultMatrixf(&ortho_matrix);
+    glMultTransposeMatrixf(&ortho_matrix);
 }
 
 pub export fn glVertex3f(x: f32, y: f32, z: f32) callconv(.c) void {
@@ -821,27 +1048,28 @@ pub export fn glVertex3f(x: f32, y: f32, z: f32) callconv(.c) void {
 }
 
 fn flushPrimitives(context: *Context) void {
+    const draw_command = context.draw_commands.getLast();
+    const triangle_count = draw_command.triangle_count;
+    const global_triangle_id_start = draw_command.triangle_id_start;
+
+    const group_count = @divTrunc(triangle_count, 8) + @intFromBool(@rem(triangle_count, 8) != 0);
+
+    if (draw_command.triangle_count == 0) {
+        return;
+    }
+
+    _ = context.triangle_positions.addManyAsSlice(context.gpa, group_count) catch @panic("oom");
+    _ = context.triangle_colors.addManyAsSlice(context.gpa, triangle_count) catch @panic("oom");
+    _ = context.triangle_tex_coords.addManyAsSlice(context.gpa, triangle_count) catch @panic("oom");
+
     switch (context.primitive_mode) {
         .triangle_list => {
-            const triangle_count = @divTrunc(context.vertex_scratch.len, 3);
-            const group_count = @divTrunc(triangle_count, 8) + @intFromBool(@rem(triangle_count, 8) != 0);
-
-            _ = context.triangle_positions.addManyAsSlice(context.gpa, group_count) catch @panic("oom");
-            _ = context.triangle_colors.addManyAsSlice(context.gpa, triangle_count) catch @panic("oom");
-            _ = context.triangle_tex_coords.addManyAsSlice(context.gpa, triangle_count) catch @panic("oom");
-
-            const global_group_start = context.triangle_count / 8;
-            const global_triangle_id_start = context.triangle_count;
-
             for (0..triangle_count) |triangle_index| {
-                const group_index = @divTrunc(triangle_index, 8);
-
-                const global_group_index = global_group_start + group_index;
-
-                const triangle_group = &context.triangle_positions.items[global_group_index];
                 const triangle_id = global_triangle_id_start + triangle_index;
-
+                const group_index = @divTrunc(triangle_id, 8);
                 const triangle_local_index = @rem(triangle_id, 8);
+
+                const triangle_group = &context.triangle_positions.items[group_index];
 
                 for (0..3) |tri_vertex_index| {
                     const scratch_index = triangle_index * 3 + tri_vertex_index;
@@ -853,39 +1081,21 @@ fn flushPrimitives(context: *Context) void {
 
                     context.triangle_colors.items[triangle_id][tri_vertex_index] = context.vertex_scratch.items(.colour)[scratch_index];
                     context.triangle_tex_coords.items[triangle_id][tri_vertex_index] = context.vertex_scratch.items(.uv)[scratch_index];
-
-                    context.triangle_colors.items[triangle_id][tri_vertex_index] = 0xff_00_ff_00;
                 }
             }
-
-            context.triangle_count += triangle_count;
         },
         .quad_list => {
-            const triangle_count = @divTrunc(context.vertex_scratch.len, 4) * 2;
-            const group_count = @divTrunc(triangle_count, 8) + @intFromBool(@rem(triangle_count, 8) != 0);
-
-            _ = context.triangle_positions.addManyAsSlice(context.gpa, group_count) catch @panic("oom");
-            _ = context.triangle_colors.addManyAsSlice(context.gpa, triangle_count) catch @panic("oom");
-            _ = context.triangle_tex_coords.addManyAsSlice(context.gpa, triangle_count) catch @panic("oom");
-
-            const global_group_start = context.triangle_count / 8;
-            const global_triangle_id_start = context.triangle_count;
-
             const quad_indices: [6]usize = .{
                 0, 1, 2,
-                // 2, 1, 3,
                 3, 2, 0,
             };
 
             for (0..triangle_count) |triangle_index| {
-                const group_index = @divTrunc(triangle_index, 8);
-
-                const global_group_index = global_group_start + group_index;
-
-                const triangle_group = &context.triangle_positions.items[global_group_index];
                 const triangle_id = global_triangle_id_start + triangle_index;
-
+                const group_index = @divTrunc(triangle_id, 8);
                 const triangle_local_index = @rem(triangle_id, 8);
+
+                const triangle_group = &context.triangle_positions.items[group_index];
 
                 const input_quad_index = @divTrunc(triangle_index, 2);
 
@@ -901,36 +1111,19 @@ fn flushPrimitives(context: *Context) void {
 
                     context.triangle_colors.items[triangle_id][tri_vertex_index] = context.vertex_scratch.items(.colour)[scratch_index];
                     context.triangle_tex_coords.items[triangle_id][tri_vertex_index] = context.vertex_scratch.items(.uv)[scratch_index];
-
-                    context.triangle_colors.items[triangle_id][tri_vertex_index] = 0xff_00_ff_ff;
                 }
             }
-
-            context.triangle_count += triangle_count;
         },
         .triangle_strip => {
-            const triangle_count = context.vertex_scratch.len - 2;
-            const group_count = @divTrunc(triangle_count, 8) + @intFromBool(@rem(triangle_count, 8) != 0);
-
-            _ = context.triangle_positions.addManyAsSlice(context.gpa, group_count) catch @panic("oom");
-            _ = context.triangle_colors.addManyAsSlice(context.gpa, triangle_count) catch @panic("oom");
-            _ = context.triangle_tex_coords.addManyAsSlice(context.gpa, triangle_count) catch @panic("oom");
-
-            const global_group_start = context.triangle_count / 8;
-            const global_triangle_id_start = context.triangle_count;
-
             for (0..triangle_count) |triangle_index| {
-                const group_index = @divTrunc(triangle_index, 8);
-
-                const global_group_index = global_group_start + group_index;
-
-                const triangle_group = &context.triangle_positions.items[global_group_index];
                 const triangle_id = global_triangle_id_start + triangle_index;
-
+                const group_index = @divTrunc(triangle_id, 8);
                 const triangle_local_index = @rem(triangle_id, 8);
 
-                const odd_indices: [3]usize = .{ 1, 2, 0 };
-                const even_indices: [3]usize = .{ 2, 1, 0 };
+                const triangle_group = &context.triangle_positions.items[group_index];
+
+                const even_indices: [3]usize = .{ 0, 1, 2 };
+                const odd_indices: [3]usize = .{ 1, 0, 2 };
 
                 for (0..3) |tri_vertex_index| {
                     const is_even = triangle_index % 2 == 0;
@@ -946,38 +1139,23 @@ fn flushPrimitives(context: *Context) void {
                     context.triangle_tex_coords.items[triangle_id][tri_vertex_index] = context.vertex_scratch.items(.uv)[scratch_index];
 
                     //debug visual
-                    context.triangle_colors.items[triangle_id][tri_vertex_index] = 0xff_00_00_ff;
+                    // context.triangle_colors.items[triangle_id][tri_vertex_index] = 0xff_00_00_ff;
                 }
             }
-
-            context.triangle_count += triangle_count;
         },
         .triangle_fan, .polygon => {
-            const triangle_count = context.vertex_scratch.len - 2;
-            const group_count = @divTrunc(triangle_count, 8) + @intFromBool(@rem(triangle_count, 8) != 0);
-
-            _ = context.triangle_positions.addManyAsSlice(context.gpa, group_count) catch @panic("oom");
-            _ = context.triangle_colors.addManyAsSlice(context.gpa, triangle_count) catch @panic("oom");
-            _ = context.triangle_tex_coords.addManyAsSlice(context.gpa, triangle_count) catch @panic("oom");
-
-            const global_group_start = context.triangle_count / 8;
-            const global_triangle_id_start = context.triangle_count;
-
             for (0..triangle_count) |triangle_index| {
-                const group_index = @divTrunc(triangle_index, 8);
-
-                const global_group_index = global_group_start + group_index;
-
-                const triangle_group = &context.triangle_positions.items[global_group_index];
                 const triangle_id = global_triangle_id_start + triangle_index;
-
+                const group_index = @divTrunc(triangle_id, 8);
                 const triangle_local_index = @rem(triangle_id, 8);
+
+                const triangle_group = &context.triangle_positions.items[group_index];
 
                 for (0..3) |tri_vertex_index| {
                     const scratch_index = switch (tri_vertex_index) {
                         0 => 0,
-                        1 => if (triangle_index > 0) triangle_index + 1 else 1,
-                        2 => if (triangle_index > 0) triangle_index + 2 else 2,
+                        1 => triangle_index + 1,
+                        2 => triangle_index + 2,
                         else => unreachable,
                     };
 
@@ -988,16 +1166,13 @@ fn flushPrimitives(context: *Context) void {
 
                     context.triangle_colors.items[triangle_id][tri_vertex_index] = context.vertex_scratch.items(.colour)[scratch_index];
                     context.triangle_tex_coords.items[triangle_id][tri_vertex_index] = context.vertex_scratch.items(.uv)[scratch_index];
-
-                    context.triangle_colors.items[triangle_id][tri_vertex_index] = 0xff_ff_ff_00;
                 }
             }
-
-            context.triangle_count += triangle_count;
         },
     }
 
     context.vertex_scratch.clearRetainingCapacity();
+    context.triangle_count += triangle_count;
 }
 
 pub export fn glColor4f(r: f32, g: f32, b: f32, a: f32) callconv(.c) void {
@@ -1055,63 +1230,98 @@ pub export fn glFlush() callconv(.c) void {
     }
 
     if (context.should_clear_color_attachment) {
-        const actual_width = centralgpu.computeTargetPaddedSize(context.bound_render_target.width);
-        _ = actual_width; // autofix
-        const actual_height = centralgpu.computeTargetPaddedSize(context.bound_render_target.height);
-        _ = actual_height; // autofix
-
         @memset(
             context.bound_render_target.pixel_ptr[0 .. context.bound_render_target.width * context.bound_render_target.height],
             @bitCast(context.clear_color),
         );
     }
 
-    std.log.info("draw_cmds: {}", .{context.draw_commands.items.len});
+    if (context.should_clear_depth_attachment) {
+        @memset(context.depth_image, context.clear_depth);
+        @memset(context.depth_image, std.math.floatMax(f32));
+    }
 
-    const debug_view = true;
+    std.log.info("total draw_cmds: {}", .{context.draw_commands.items.len});
+    std.log.info("total triangle: {}", .{context.triangle_count});
 
-    context.scissor = .{ .x = context.viewport.x, .y = context.viewport.y, .width = context.viewport.width, .height = context.viewport.height };
+    var previous_mask: centralgpu.WarpRegister(bool) = @splat(false);
+    var previous_group: usize = 0;
 
-    if (debug_view) {
+    for (context.draw_commands.items, 0..) |draw_command, draw_index| {
+        if (draw_command.triangle_count == 0) {
+            continue;
+        }
 
-        //debug all vertices in one pipeline
+        const triangle_group_begin = draw_command.triangle_id_start / 8;
+        const triangle_group_count = draw_command.triangle_count / 8 + @intFromBool(draw_command.triangle_count % 8 != 0);
 
-        const triangle_group_begin = 0;
-        const triangle_group_count = context.triangle_count / 8 + @intFromBool(context.triangle_count % 8 != 0);
+        const actual_scissor_x: i32 = if (draw_command.flags.enable_scissor_test) draw_command.scissor_x else context.viewport.x;
+        const actual_scissor_y: i32 = if (draw_command.flags.enable_scissor_test) draw_command.scissor_y else context.viewport.y;
+        const actual_scissor_width: i32 = if (draw_command.flags.enable_scissor_test) draw_command.scissor_width else @truncate(context.viewport.width);
+        const actual_scissor_height: i32 = if (draw_command.flags.enable_scissor_test) draw_command.scissor_height else @truncate(context.viewport.height);
+
+        var triangle_id_start: u32 = @intCast(draw_command.triangle_id_start);
 
         for (triangle_group_begin..triangle_group_begin + triangle_group_count) |triangle_group_id| {
+            defer triangle_id_start += 8 - @rem(triangle_id_start, 8);
+
             const unfiorms: centralgpu.Uniforms = .{
                 .vertex_positions = context.triangle_positions.items,
                 .vertex_colours = context.triangle_colors.items,
                 .vertex_texture_coords = context.triangle_tex_coords.items,
-                .image_base = undefined,
-                .image_descriptor = undefined,
+                .image_base = @ptrCast(draw_command.image_base),
+                .image_descriptor = draw_command.image_descriptor,
             };
 
             var triangle_mask: centralgpu.WarpRegister(bool) = @splat(true);
 
             var triangle_id: centralgpu.WarpRegister(u32) = std.simd.iota(u32, 8);
 
-            triangle_id += @splat(@intCast(triangle_group_id * 8));
+            triangle_id += @as(centralgpu.WarpRegister(u32), @splat(@intCast(triangle_group_id * 8)));
 
-            triangle_mask = centralgpu.vectorBoolAnd(triangle_mask, triangle_id >= @as(centralgpu.WarpRegister(u32), @splat(0)));
-            triangle_mask = centralgpu.vectorBoolAnd(triangle_mask, triangle_id < @as(centralgpu.WarpRegister(u32), @splat(@intCast(context.triangle_count))));
+            triangle_mask = centralgpu.vectorBoolAnd(triangle_mask, triangle_id < @as(centralgpu.WarpRegister(u32), @splat(draw_command.triangle_id_start + draw_command.triangle_count)));
 
-            const viewport_x: f32 = @floatFromInt(context.viewport.x);
-            const viewport_y: f32 = @floatFromInt(context.viewport.y);
+            if (triangle_group_id == previous_group) {
+                const mask_anded = centralgpu.vectorBoolAnd(previous_mask, triangle_mask);
 
-            const viewport_width: f32 = @floatFromInt(context.viewport.width);
-            const viewport_height: f32 = @floatFromInt(context.viewport.height);
+                triangle_mask = centralgpu.vectorBoolAnd(triangle_mask, centralgpu.vectorBoolNot(mask_anded));
+
+                std.log.info("draw_idx = {}", .{draw_index});
+                std.log.info("draw_command.triangle_id_start = {}", .{draw_command.triangle_id_start});
+                std.log.info("triangle_id_start = {}", .{triangle_id_start});
+                std.log.info("triangle_group_id = {}", .{triangle_group_id});
+                std.log.info("triangle_id = {}", .{triangle_id});
+                std.log.info("triangle_mask = {}", .{triangle_mask});
+
+                if (@reduce(.Or, centralgpu.vectorBoolAnd(previous_mask, triangle_mask)) == true) {
+                    @panic("Overlapping mask");
+                }
+            }
+
+            defer previous_mask = triangle_mask;
+            defer previous_group = triangle_group_id;
+
+            const viewport_x: f32 = @floatFromInt(draw_command.viewport_x);
+            const viewport_y: f32 = @floatFromInt(draw_command.viewport_y);
+
+            const viewport_width: f32 = @floatFromInt(draw_command.viewport_width);
+            const viewport_height: f32 = @floatFromInt(draw_command.viewport_height);
+
+            const geometry_state: centralgpu.GeometryProcessState = .{
+                .viewport_transform = .{
+                    .translation_x = viewport_x + viewport_width * 0.5,
+                    .translation_y = viewport_y + viewport_height * 0.5,
+                    .scale_x = viewport_width * 0.5,
+                    .scale_y = -viewport_height * 0.5,
+                    .translation_z = (draw_command.depth_max + draw_command.depth_min) * 0.5,
+                    .scale_z = (draw_command.depth_max - draw_command.depth_min) * 0.5,
+                    // .translation_z = 0,
+                    // .scale_z = 1,
+                },
+            };
 
             const projected_triangles = centralgpu.processGeometry(
-                .{
-                    .viewport_transform = .{
-                        .translation_x = viewport_x + viewport_width * 0.5,
-                        .translation_y = viewport_y + viewport_height * 0.5,
-                        .scale_x = viewport_width * 0.5,
-                        .scale_y = viewport_height * 0.5,
-                    },
-                },
+                geometry_state,
                 unfiorms,
                 triangle_group_id * 8,
                 triangle_mask,
@@ -1122,103 +1332,24 @@ pub export fn glFlush() callconv(.c) void {
             }
 
             centralgpu.rasterize(
+                geometry_state,
                 .{
-                    .scissor_min_x = context.scissor.x,
-                    .scissor_min_y = context.scissor.y,
-                    .scissor_max_x = @truncate(context.scissor.width),
-                    .scissor_max_y = @truncate(context.scissor.height),
+                    .scissor_min_x = actual_scissor_x,
+                    .scissor_min_y = actual_scissor_y,
+                    .scissor_max_x = actual_scissor_width,
+                    .scissor_max_y = actual_scissor_height,
                     .render_target = context.bound_render_target,
+                    .depth_image = context.depth_image.ptr,
+                    .flags = .{
+                        .enable_depth_test = draw_command.flags.enable_depth_test,
+                        .enable_alpha_test = draw_command.flags.enable_alpha_test,
+                        .enable_depth_write = draw_command.flags.enable_depth_write and draw_command.flags.enable_depth_test,
+                    },
                 },
                 unfiorms,
                 triangle_group_id * 8,
                 projected_triangles,
             );
-        }
-    } else {
-        for (context.draw_commands.items) |draw_command| {
-            if (draw_command.triangle_count == 0) {
-                continue;
-            }
-
-            const triangle_group_begin = draw_command.triangle_id_start / 8;
-            const triangle_group_count = draw_command.triangle_count / 8 + @intFromBool(draw_command.triangle_count % 8 != 0);
-
-            std.log.info("draw_cmd: triangle_begin: {}", .{draw_command.triangle_id_start});
-            std.log.info("draw_cmd: triangle_count: {}", .{draw_command.triangle_count});
-
-            std.log.info("draw_cmd: group_begin: {}", .{triangle_group_begin});
-            std.log.info("draw_cmd: group_count: {}", .{triangle_group_count});
-
-            for (draw_command.triangle_id_start..draw_command.triangle_id_start + draw_command.triangle_count) |tri_id| {
-                for (0..3) |tri_vert| {
-                    const tri_group = context.triangle_positions.items[@divTrunc(tri_id, 8)][tri_vert];
-
-                    std.log.info("triangle({}): pos_{}: {}, {}, {}, {}", .{
-                        tri_id,
-                        tri_vert,
-                        tri_group.x[@rem(tri_id, 8)],
-                        tri_group.y[@rem(tri_id, 8)],
-                        tri_group.z[@rem(tri_id, 8)],
-                        tri_group.w[@rem(tri_id, 8)],
-                    });
-                }
-            }
-
-            for (triangle_group_begin..triangle_group_begin + triangle_group_count) |triangle_group_id| {
-                const unfiorms: centralgpu.Uniforms = .{
-                    .vertex_positions = context.triangle_positions.items,
-                    .vertex_colours = context.triangle_colors.items,
-                    .vertex_texture_coords = context.triangle_tex_coords.items,
-                    .image_base = @ptrCast(draw_command.image_base),
-                    .image_descriptor = draw_command.image_descriptor,
-                };
-
-                var triangle_mask: centralgpu.WarpRegister(bool) = @splat(true);
-
-                var triangle_id: centralgpu.WarpRegister(u32) = std.simd.iota(u32, 8);
-
-                triangle_id += @splat(@intCast(triangle_group_id * 8));
-
-                triangle_mask = centralgpu.vectorBoolAnd(triangle_mask, triangle_id >= @as(centralgpu.WarpRegister(u32), @splat(draw_command.triangle_id_start)));
-                triangle_mask = centralgpu.vectorBoolAnd(triangle_mask, triangle_id < @as(centralgpu.WarpRegister(u32), @splat(draw_command.triangle_id_start + draw_command.triangle_count)));
-
-                const viewport_x: f32 = @floatFromInt(context.viewport.x);
-                const viewport_y: f32 = @floatFromInt(context.viewport.y);
-
-                const viewport_width: f32 = @floatFromInt(context.viewport.width);
-                const viewport_height: f32 = @floatFromInt(context.viewport.height);
-
-                const projected_triangles = centralgpu.processGeometry(
-                    .{
-                        .viewport_transform = .{
-                            .translation_x = viewport_x + viewport_width * 0.5,
-                            .translation_y = viewport_y + viewport_height * 0.5,
-                            .scale_x = viewport_width * 0.5,
-                            .scale_y = viewport_height * 0.5,
-                        },
-                    },
-                    unfiorms,
-                    triangle_group_id * 8,
-                    triangle_mask,
-                );
-
-                if (std.simd.countTrues(projected_triangles.mask) == 0) {
-                    continue;
-                }
-
-                centralgpu.rasterize(
-                    .{
-                        .scissor_min_x = context.scissor.x,
-                        .scissor_min_y = context.scissor.y,
-                        .scissor_max_x = @truncate(context.scissor.width),
-                        .scissor_max_y = @truncate(context.scissor.height),
-                        .render_target = context.bound_render_target,
-                    },
-                    unfiorms,
-                    triangle_group_id * 8,
-                    projected_triangles,
-                );
-            }
         }
     }
 
@@ -1234,50 +1365,6 @@ pub export fn glFlush() callconv(.c) void {
 pub export fn glFinish() callconv(.c) void {
     glFlush();
 }
-
-pub const GL_TEXTURE_ENV: i32 = 0x2300;
-pub const GL_TEXTURE_ENV_MODE: i32 = 0x2200;
-pub const GL_TEXTURE_1D: i32 = 0x0DE0;
-pub const GL_TEXTURE_2D: i32 = 0x0DE1;
-pub const GL_TEXTURE_WRAP_S: i32 = 0x2802;
-pub const GL_TEXTURE_WRAP_T: i32 = 0x2803;
-pub const GL_TEXTURE_MAG_FILTER: i32 = 0x2800;
-pub const GL_TEXTURE_MIN_FILTER: i32 = 0x2801;
-pub const GL_TEXTURE_ENV_COLOR: i32 = 0x2201;
-pub const GL_TEXTURE_GEN_S: i32 = 0x0C60;
-pub const GL_TEXTURE_GEN_T: i32 = 0x0C61;
-pub const GL_TEXTURE_GEN_R: i32 = 0x0C62;
-pub const GL_TEXTURE_GEN_Q: i32 = 0x0C63;
-pub const GL_TEXTURE_GEN_MODE: i32 = 0x2500;
-pub const GL_TEXTURE_BORDER_COLOR: i32 = 0x1004;
-pub const GL_TEXTURE_WIDTH: i32 = 0x1000;
-pub const GL_TEXTURE_HEIGHT: i32 = 0x1001;
-pub const GL_TEXTURE_BORDER: i32 = 0x1005;
-pub const GL_TEXTURE_COMPONENTS: i32 = 0x1003;
-pub const GL_TEXTURE_RED_SIZE: i32 = 0x805C;
-pub const GL_TEXTURE_GREEN_SIZE: i32 = 0x805D;
-pub const GL_TEXTURE_BLUE_SIZE: i32 = 0x805E;
-pub const GL_TEXTURE_ALPHA_SIZE: i32 = 0x805F;
-pub const GL_TEXTURE_LUMINANCE_SIZE: i32 = 0x8060;
-pub const GL_TEXTURE_INTENSITY_SIZE: i32 = 0x8061;
-pub const GL_NEAREST_MIPMAP_NEAREST: i32 = 0x2700;
-pub const GL_NEAREST_MIPMAP_LINEAR: i32 = 0x2702;
-pub const GL_LINEAR_MIPMAP_NEAREST: i32 = 0x2701;
-pub const GL_LINEAR_MIPMAP_LINEAR: i32 = 0x2703;
-pub const GL_OBJECT_LINEAR: i32 = 0x2401;
-pub const GL_OBJECT_PLANE: i32 = 0x2501;
-pub const GL_EYE_LINEAR: i32 = 0x2400;
-pub const GL_EYE_PLANE: i32 = 0x2502;
-pub const GL_SPHERE_MAP: i32 = 0x2402;
-pub const GL_DECAL: i32 = 0x2101;
-pub const GL_MODULATE: i32 = 0x2100;
-pub const GL_NEAREST: i32 = 0x2600;
-pub const GL_REPEAT: i32 = 0x2901;
-pub const GL_CLAMP: i32 = 0x2900;
-pub const GL_S: i32 = 0x2000;
-pub const GL_T: i32 = 0x2001;
-pub const GL_R: i32 = 0x2002;
-pub const GL_Q: i32 = 0x2003;
 
 pub const GL_FRONT_LEFT: i32 = 0x0400;
 pub const GL_FRONT_RIGHT: i32 = 0x0401;
@@ -1409,8 +1496,6 @@ pub const GL_TRIANGLE_FAN: u32 = 0x0006;
 pub const GL_QUADS: u32 = 0x0007;
 pub const GL_POLYGON: u32 = 0x0009;
 
-pub const GL_COLOR_BUFFER_BIT: u32 = 0x00004000;
-
 pub const GL_MAX_LIST_NESTING: i32 = 0x0B31;
 pub const GL_MAX_EVAL_ORDER: i32 = 0x0D30;
 pub const GL_MAX_LIGHTS: i32 = 0x0D31;
@@ -1429,6 +1514,123 @@ pub const GL_MAX_CLIENT_ATTRIB_STACK_DEPTH: i32 = 0x0D3B;
 pub const GL_MODELVIEW: u32 = 0x1700;
 pub const GL_PROJECTION: u32 = 0x1701;
 pub const GL_TEXTURE: u32 = 0x1702;
+
+// Texture mapping
+pub const GL_TEXTURE_ENV: i32 = 0x2300;
+pub const GL_TEXTURE_ENV_MODE: i32 = 0x2200;
+pub const GL_TEXTURE_1D: i32 = 0x0DE0;
+pub const GL_TEXTURE_2D: i32 = 0x0DE1;
+pub const GL_TEXTURE_WRAP_S: i32 = 0x2802;
+pub const GL_TEXTURE_WRAP_T: i32 = 0x2803;
+pub const GL_TEXTURE_MAG_FILTER: i32 = 0x2800;
+pub const GL_TEXTURE_MIN_FILTER: i32 = 0x2801;
+pub const GL_TEXTURE_ENV_COLOR: i32 = 0x2201;
+pub const GL_TEXTURE_GEN_S: i32 = 0x0C60;
+pub const GL_TEXTURE_GEN_T: i32 = 0x0C61;
+pub const GL_TEXTURE_GEN_R: i32 = 0x0C62;
+pub const GL_TEXTURE_GEN_Q: i32 = 0x0C63;
+pub const GL_TEXTURE_GEN_MODE: i32 = 0x2500;
+pub const GL_TEXTURE_BORDER_COLOR: i32 = 0x1004;
+pub const GL_TEXTURE_WIDTH: i32 = 0x1000;
+pub const GL_TEXTURE_HEIGHT: i32 = 0x1001;
+pub const GL_TEXTURE_BORDER: i32 = 0x1005;
+pub const GL_TEXTURE_COMPONENTS: i32 = 0x1003;
+pub const GL_TEXTURE_RED_SIZE: i32 = 0x805C;
+pub const GL_TEXTURE_GREEN_SIZE: i32 = 0x805D;
+pub const GL_TEXTURE_BLUE_SIZE: i32 = 0x805E;
+pub const GL_TEXTURE_ALPHA_SIZE: i32 = 0x805F;
+pub const GL_TEXTURE_LUMINANCE_SIZE: i32 = 0x8060;
+pub const GL_TEXTURE_INTENSITY_SIZE: i32 = 0x8061;
+pub const GL_NEAREST_MIPMAP_NEAREST: i32 = 0x2700;
+pub const GL_NEAREST_MIPMAP_LINEAR: i32 = 0x2702;
+pub const GL_LINEAR_MIPMAP_NEAREST: i32 = 0x2701;
+pub const GL_LINEAR_MIPMAP_LINEAR: i32 = 0x2703;
+pub const GL_OBJECT_LINEAR: i32 = 0x2401;
+pub const GL_OBJECT_PLANE: i32 = 0x2501;
+pub const GL_EYE_LINEAR: i32 = 0x2400;
+pub const GL_EYE_PLANE: i32 = 0x2502;
+pub const GL_SPHERE_MAP: i32 = 0x2402;
+pub const GL_DECAL: i32 = 0x2101;
+pub const GL_MODULATE: i32 = 0x2100;
+pub const GL_NEAREST: i32 = 0x2600;
+pub const GL_REPEAT: i32 = 0x2901;
+pub const GL_CLAMP: i32 = 0x2900;
+pub const GL_S: i32 = 0x2000;
+pub const GL_T: i32 = 0x2001;
+pub const GL_R: i32 = 0x2002;
+pub const GL_Q: i32 = 0x2003;
+
+pub const GL_FOG: i32 = 0x0B60;
+pub const GL_FOG_MODE: i32 = 0x0B65;
+pub const GL_FOG_DENSITY: i32 = 0x0B62;
+pub const GL_FOG_COLOR: i32 = 0x0B66;
+pub const GL_FOG_INDEX: i32 = 0x0B61;
+pub const GL_FOG_START: i32 = 0x0B63;
+pub const GL_FOG_END: i32 = 0x0B64;
+pub const GL_LINEAR: i32 = 0x2601;
+pub const GL_EXP: i32 = 0x0800;
+pub const GL_EXP2: i32 = 0x0801;
+
+pub const GL_ALPHA_TEST: i32 = 0x0BC0;
+pub const GL_ALPHA_TEST_REF: i32 = 0x0BC2;
+pub const GL_ALPHA_TEST_FUNC: i32 = 0x0BC1;
+
+pub const GL_NEVER: i32 = 0x0200;
+pub const GL_LESS: i32 = 0x0201;
+pub const GL_EQUAL: i32 = 0x0202;
+pub const GL_LEQUAL: i32 = 0x0203;
+pub const GL_GREATER: i32 = 0x0204;
+pub const GL_NOTEQUAL: i32 = 0x0205;
+pub const GL_GEQUAL: i32 = 0x0206;
+pub const GL_ALWAYS: i32 = 0x0207;
+pub const GL_DEPTH_TEST: i32 = 0x0B71;
+pub const GL_DEPTH_BITS: i32 = 0x0D56;
+pub const GL_DEPTH_CLEAR_VALUE: i32 = 0x0B73;
+pub const GL_DEPTH_FUNC: i32 = 0x0B74;
+pub const GL_DEPTH_RANGE: i32 = 0x0B70;
+pub const GL_DEPTH_WRITEMASK: i32 = 0x0B72;
+pub const GL_DEPTH_COMPONENT: i32 = 0x1902;
+
+pub const GL_SCISSOR_BOX: i32 = 0x0C10;
+pub const GL_SCISSOR_TEST: i32 = 0x0C11;
+
+pub const GL_STENCIL_BITS: i32 = 0x0D57;
+pub const GL_STENCIL_TEST: i32 = 0x0B90;
+pub const GL_STENCIL_CLEAR_VALUE: i32 = 0x0B91;
+pub const GL_STENCIL_FUNC: i32 = 0x0B92;
+pub const GL_STENCIL_VALUE_MASK: i32 = 0x0B93;
+pub const GL_STENCIL_FAIL: i32 = 0x0B94;
+pub const GL_STENCIL_PASS_DEPTH_FAIL: i32 = 0x0B95;
+pub const GL_STENCIL_PASS_DEPTH_PASS: i32 = 0x0B96;
+pub const GL_STENCIL_REF: i32 = 0x0B97;
+pub const GL_STENCIL_WRITEMASK: i32 = 0x0B98;
+pub const GL_STENCIL_INDEX: i32 = 0x1901;
+pub const GL_KEEP: i32 = 0x1E00;
+pub const GL_REPLACE: i32 = 0x1E01;
+pub const GL_INCR: i32 = 0x1E02;
+pub const GL_DECR: i32 = 0x1E03;
+
+pub const GL_CURRENT_BIT: i32 = 0x00000001;
+pub const GL_POINT_BIT: i32 = 0x00000002;
+pub const GL_LINE_BIT: i32 = 0x00000004;
+pub const GL_POLYGON_BIT: i32 = 0x00000008;
+pub const GL_POLYGON_STIPPLE_BIT: i32 = 0x00000010;
+pub const GL_PIXEL_MODE_BIT: i32 = 0x00000020;
+pub const GL_LIGHTING_BIT: i32 = 0x00000040;
+pub const GL_FOG_BIT: i32 = 0x00000080;
+pub const GL_DEPTH_BUFFER_BIT: i32 = 0x00000100;
+pub const GL_ACCUM_BUFFER_BIT: i32 = 0x00000200;
+pub const GL_STENCIL_BUFFER_BIT: i32 = 0x00000400;
+pub const GL_VIEWPORT_BIT: i32 = 0x00000800;
+pub const GL_TRANSFORM_BIT: i32 = 0x00001000;
+pub const GL_ENABLE_BIT: i32 = 0x00002000;
+pub const GL_COLOR_BUFFER_BIT: i32 = 0x00004000;
+pub const GL_HINT_BIT: i32 = 0x00008000;
+pub const GL_EVAL_BIT: i32 = 0x00010000;
+pub const GL_LIST_BIT: i32 = 0x00020000;
+pub const GL_TEXTURE_BIT: i32 = 0x00040000;
+pub const GL_SCISSOR_BIT: i32 = 0x00080000;
+pub const GL_ALL_ATTRIB_BITS: i32 = 0x000FFFFF;
 
 const log = std.log.scoped(.centralgpu_gl);
 const std = @import("std");

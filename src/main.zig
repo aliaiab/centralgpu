@@ -52,6 +52,7 @@ pub fn main() !void {
     gl.current_context.?.* = .{
         .gpa = gpa,
         .bound_render_target = .{ .pixel_ptr = target_buffer.ptr, .width = render_target_width, .height = render_target_height },
+        .depth_image = try gpa.alloc(f32, render_target_width * render_target_height),
     };
     const shambler_texture_data = try std.fs.cwd().readFileAlloc(gpa, "zig-out/bin/shambler_base_color.data", std.math.maxInt(usize));
     defer gpa.free(shambler_texture_data);
