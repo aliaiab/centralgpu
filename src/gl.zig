@@ -37,38 +37,58 @@ pub const Context = struct {
     triangle_count: usize = 0,
     triangle_positions: std.ArrayListUnmanaged([3]centralgpu.WarpVec4(f32)) = .empty,
     triangle_colors: std.ArrayListUnmanaged([3]u32) = .empty,
-    triangle_tex_coords: std.ArrayListUnmanaged([3][2]f32) = .empty,
+    triangle_tex_coords: std.ArrayListUnmanaged([3][4][2]f32) = .empty,
 
+    default_texture_descriptor: centralgpu.ImageDescriptor = .{
+        .width_log2 = 0,
+        .height_log2 = 0,
+        .sampler_filter = .bilinear,
+        .sampler_address_mode = .repeat,
+        .rel_ptr = -1,
+        .border_colour_shift_amount = 0,
+    },
     textures: std.ArrayListUnmanaged(struct {
         texture_data: []centralgpu.Rgba32,
         descriptor: centralgpu.ImageDescriptor,
         internal_format: i32,
         width: u32,
+        height: u32,
+
+        //texture environment
+        rgb_scale: f32,
     }) = .empty,
-    texture_binding: [4]u32 = @splat(0),
     ///Maps from GL_TEXTURE_0..80
     texture_units: [80]u32 = @splat(0),
+    texture_environments: [80]centralgpu.TextureEnvironment = [1]centralgpu.TextureEnvironment{.{}} ** 80,
     texture_unit_active: u32 = 0,
 
     //Vertex Registers
     vertex_colour: u32 = 0xff_ff_ff_ff,
-    vertex_uv: [2]f32 = @splat(0),
+    vertex_uv: [4][2]f32 = [1][2]f32{@splat(0)} ** 4,
 
     //Vertex scratch
     vertex_scratch: std.MultiArrayList(struct {
         position: [4]f32,
         colour: u32,
-        uv: [2]f32,
+        //Indexed by texture unit
+        uv: [4][2]f32,
     }) = .empty,
 
     draw_commands: std.ArrayListUnmanaged(DrawCommandState) = .empty,
 
     //Draw state
-    enable_texturing: bool = true,
+    enable_texturing: bool = false,
     enable_alpha_test: bool = false,
     enable_scissor_test: bool = false,
     enable_depth_test: bool = false,
-    enable_depth_write: bool = true,
+    enable_depth_write: bool = false,
+    enable_face_cull: bool = false,
+    enable_blend: bool = false,
+
+    blend_state: centralgpu.BlendState = .{
+        .src_factor = .one,
+        .dst_factor = .zero,
+    },
 
     depth_min: f32 = 0,
     depth_max: f32 = 1,
@@ -92,10 +112,12 @@ const DrawCommandState = struct {
     scratch_vertex_start: u32,
     scratch_vertex_end: u32,
 
-    image_base: [*]const u8,
-    image_descriptor: centralgpu.ImageDescriptor,
+    image_base: [4][*]const u8,
+    image_descriptor: [4]centralgpu.ImageDescriptor,
+    texture_environments: [4]centralgpu.TextureEnvironment,
 
     flags: Flags,
+    blend_state: centralgpu.BlendState,
 
     scissor_x: i32,
     scissor_y: i32,
@@ -114,7 +136,9 @@ const DrawCommandState = struct {
         enable_scissor_test: bool,
         enable_depth_test: bool,
         enable_depth_write: bool,
-        _: u4,
+        enable_blend: bool,
+        enable_backface_cull: bool,
+        _: u2,
     };
 };
 
@@ -183,8 +207,12 @@ pub export fn glGetIntegerv(
         GL_MAX_TEXTURE_SIZE => {
             params.* = @intCast(std.math.maxInt(u16));
         },
+        GL_MAX_TEXTURE_UNITS => {
+            params.* = 32;
+        },
         else => {
-            @panic("");
+            log.info("glGetIntegerV: 0x{x}", .{pname});
+            @panic("Unsupported getIntegerV");
         },
     }
 }
@@ -204,6 +232,34 @@ pub export fn glScissor(x: i32, y: i32, w: isize, h: isize) callconv(.c) void {
     };
 }
 
+fn readSrcPixel(
+    _type: i32,
+    data: *const anyopaque,
+    component_count: usize,
+    index: usize,
+) centralgpu.Rgba32 {
+    switch (_type) {
+        GL_UNSIGNED_BYTE => {
+            const source_data_ptr: [*]const u8 = @ptrCast(data);
+
+            if (component_count < 4) {
+                // @panic("");
+            }
+
+            return .{
+                .r = source_data_ptr[index * 4 + 0],
+                .g = source_data_ptr[index * 4 + 1],
+                .b = source_data_ptr[index * 4 + 2],
+                .a = if (component_count < 4) 255 else source_data_ptr[index * 4 + 3],
+            };
+        },
+        else => {
+            log.info("data_type: 0x{x}", .{_type});
+            @panic("Texture src data type out of range!");
+        },
+    }
+}
+
 pub export fn glTexSubImage2D(
     target: i32,
     level: i32,
@@ -215,9 +271,7 @@ pub export fn glTexSubImage2D(
     _type: i32,
     data: *const anyopaque,
 ) callconv(.c) void {
-    _ = level; // autofix
     _ = format; // autofix
-    _ = _type; // autofix
 
     const context = current_context.?;
 
@@ -225,29 +279,54 @@ pub export fn glTexSubImage2D(
         @panic("only GL_TEXTURE_2D is supported");
     }
 
-    const texture = &context.textures.items[context.texture_binding[@intCast(target - GL_TEXTURE_2D)] - 1];
+    if (level != 0) {
+        return;
+    }
 
-    const component_count: usize = @intCast(texture.internal_format);
+    const texture = &context.textures.items[context.texture_units[context.texture_unit_active] - 1];
+
+    const component_count: usize = internalFormatComponentCount(texture.internal_format);
 
     const dest_data_ptr: [*]centralgpu.Rgba32 = texture.texture_data.ptr;
-    const source_data_ptr: [*]const u8 = @ptrCast(data);
 
-    var y: usize = @intCast(y_offset);
+    const start_x: usize = @intCast(x_offset);
+    const start_y: usize = @intCast(y_offset);
+    const end_x: usize = @intCast(x_offset + width);
+    const end_y: usize = @intCast(y_offset + height);
 
-    while (y < height) : (y += 1) {
-        var x: usize = @intCast(x_offset);
+    var y: usize = start_y;
 
-        while (x < width) : (x += 1) {
-            const src_index = y * @as(usize, @intCast(width)) + x;
+    while (y < end_y) : (y += 1) {
+        var x: usize = start_x;
+
+        while (x < end_x) : (x += 1) {
+            const src_x: usize = x - start_x;
+            const src_y: usize = y - start_y;
+
+            const actual_y: usize = (@as(usize, @intCast(texture.height - 1)) - y);
+            _ = actual_y; // autofix
+            const src_index = @as(usize, @intCast(src_y)) * @as(usize, @intCast(width)) + src_x;
             const index = centralgpu.mortonEncode(@splat(@intCast(x)), @splat(@intCast(y)))[0];
 
-            dest_data_ptr[index] = .{
-                .r = source_data_ptr[src_index * component_count + 0],
-                .g = source_data_ptr[src_index * component_count + 1],
-                .b = source_data_ptr[src_index * component_count + 2],
-                .a = if (component_count < 4) 255 else source_data_ptr[src_index * component_count + 3],
-            };
+            dest_data_ptr[index] = readSrcPixel(_type, data, component_count, src_index);
         }
+    }
+}
+
+fn internalFormatComponentCount(internal_format: i32) usize {
+    if (internal_format <= 4) {
+        return @intCast(internal_format);
+    }
+
+    switch (internal_format) {
+        GL_RGB10_A2,
+        => {
+            return 4;
+        },
+        else => {
+            log.info("internalFormat: 0x{x}", .{internal_format});
+            @panic("internalFormat out of range");
+        },
     }
 }
 
@@ -268,21 +347,21 @@ pub export fn glTexImage2D(
         @panic("only GL_TEXTURE_2D is supported");
     }
 
-    const texture = &context.textures.items[context.texture_binding[@intCast(target - GL_TEXTURE_2D)] - 1];
+    if (level != 0) {
+        // @panic("Accessing level");
+        return;
+    }
+
+    const texture = &context.textures.items[context.texture_units[context.texture_unit_active] - 1];
 
     texture.internal_format = internalFormat;
     texture.width = @intCast(width);
+    texture.height = @intCast(height);
+    texture.rgb_scale = 1;
 
-    log.info("components = {}", .{internalFormat});
-    log.info("format = {}", .{format});
-
-    if (internalFormat < 3 or internalFormat > 4) {
-        @panic("internalFormat out of range");
-    }
-
-    if (_type != GL_UNSIGNED_BYTE) {
-        @panic("type out of range");
-    }
+    log.info("components = 0x{x}", .{internalFormat});
+    log.info("format = 0x{x}", .{format});
+    log.info("format_type = 0x{x}", .{_type});
 
     if (format != GL_RGBA) {
         @panic("component type not supported");
@@ -303,8 +382,7 @@ pub export fn glTexImage2D(
         .rel_ptr = 0,
         .width_log2 = @intCast(std.math.log2_int(usize, @intCast(width))),
         .height_log2 = @intCast(std.math.log2_int(usize, @intCast(height))),
-        // .sampler_filter = .bilinear,
-        .sampler_filter = .nearest,
+        .sampler_filter = .bilinear,
         .sampler_address_mode = .repeat,
         .border_colour_shift_amount = 4,
     };
@@ -370,8 +448,14 @@ pub export fn glDeleteTextures(
         const texture_handle = textures[k];
         const texture = &context.textures.items[texture_handle - 1];
 
+        for (context.texture_units[0..]) |*bound_tex| {
+            if (bound_tex.* == texture_handle) {
+                bound_tex.* = 0;
+            }
+        }
+
         //TODO: check that data has actually been allocated
-        context.gpa.free(texture.texture_data);
+        std.heap.page_allocator.free(texture.texture_data);
     }
 }
 
@@ -394,10 +478,66 @@ pub export fn glBindTexture(
     const context = current_context.?;
 
     const binding_index: usize = @intCast(target - GL_TEXTURE_2D);
+    _ = binding_index; // autofix
 
-    if (texture != context.texture_units[context.texture_unit_active]) {
-        context.texture_binding[binding_index] = texture;
-        context.texture_units[context.texture_unit_active] = texture;
+    if (texture == context.textures.items.len) {
+        _ = context.textures.addOne(context.gpa) catch @panic("");
+    }
+
+    std.debug.assert(texture < context.textures.items.len);
+
+    context.texture_units[context.texture_unit_active] = texture;
+}
+
+pub export fn glTexEnvi(
+    target: i32,
+    pname: i32,
+    param: i32,
+) callconv(.c) void {
+    glTexEnvf(target, pname, @floatFromInt(param));
+}
+
+pub export fn glTexEnvf(
+    target: i32,
+    pname: i32,
+    param: f32,
+) callconv(.c) void {
+    _ = target; // autofix
+    const context = current_context.?;
+
+    const tex_env = &context.texture_environments[context.texture_unit_active];
+
+    switch (pname) {
+        GL_TEXTURE_ENV_MODE => {
+            tex_env.function = switch (@as(i32, @intFromFloat(param))) {
+                GL_MODULATE => .modulate,
+                GL_REPLACE => .replace,
+                GL_ADD => .add,
+                else => tex_env.function,
+            };
+        },
+        GL_COMBINE_RGB => {
+            tex_env.function = switch (@as(i32, @intFromFloat(param))) {
+                GL_MODULATE => .modulate,
+                GL_REPLACE => .replace,
+                GL_ADD => .add,
+                else => {
+                    std.debug.print("texture env func: 0x{x}\n", .{@as(i32, @intFromFloat(param))});
+                    @panic("texture env function not supported");
+                    // return;
+                },
+            };
+        },
+        GL_SOURCE0_RGB => {},
+        GL_SOURCE1_RGB => {},
+        GL_SOURCE2_RGB => {},
+        GL_RGB_SCALE => {
+            tex_env.rgb_scale = param;
+        },
+        else => {
+            std.debug.print("0x{x}\n", .{pname});
+            @panic("Unsupported pname");
+        },
     }
 }
 
@@ -406,8 +546,17 @@ pub export fn glTexParameteri(
     pname: i32,
     param: i32,
 ) callconv(.c) void {
+    _ = target; // autofix
     const context = current_context.?;
-    const texture = &context.textures.items[context.texture_binding[@intCast(target - GL_TEXTURE_2D)] - 1];
+
+    var descriptor: *centralgpu.ImageDescriptor = undefined;
+
+    if (context.texture_units[context.texture_unit_active] != 0) {
+        const texture = &context.textures.items[context.texture_units[context.texture_unit_active] - 1];
+        descriptor = &texture.descriptor;
+    } else {
+        descriptor = &context.default_texture_descriptor;
+    }
 
     switch (pname) {
         GL_TEXTURE_MIN_FILTER,
@@ -418,14 +567,13 @@ pub export fn glTexParameteri(
                 GL_NEAREST_MIPMAP_LINEAR,
                 GL_NEAREST_MIPMAP_NEAREST,
                 => {
-                    texture.descriptor.sampler_filter = .nearest;
+                    descriptor.sampler_filter = .nearest;
                 },
                 GL_LINEAR,
                 GL_LINEAR_MIPMAP_NEAREST,
                 GL_LINEAR_MIPMAP_LINEAR,
                 => {
-                    texture.descriptor.sampler_filter = .bilinear;
-                    texture.descriptor.sampler_filter = .nearest;
+                    descriptor.sampler_filter = .bilinear;
                 },
                 else => {},
             }
@@ -450,9 +598,9 @@ pub export fn glTexParameterf(
     pname: i32,
     param: f32,
 ) callconv(.c) void {
-    _ = param; // autofix
-    _ = target; // autofix
-    _ = pname; // autofix
+    const param_int: i64 = @intFromFloat(param);
+
+    glTexParameteri(target, pname, @truncate(param_int));
 }
 
 pub export fn glGetTexParameterfv(
@@ -470,6 +618,8 @@ pub export fn glGenerateMipmap(
 ) callconv(.c) void {
     _ = target; // autofix
 }
+
+pub export fn glDrawElements() callconv(.c) void {}
 
 pub export fn glBegin(flags: u32) callconv(.c) void {
     const context = current_context.?;
@@ -554,29 +704,35 @@ fn startCommand(context: *Context) void {
     command.scratch_vertex_start = @intCast(context.vertex_scratch.len);
     command.scratch_vertex_end = 0;
 
-    const texture_unit = context.texture_unit_active;
+    command.texture_environments = [1]centralgpu.TextureEnvironment{.{}} ** 4;
 
-    const texture_handle = context.texture_units[texture_unit];
-    // const texture_handle: u32 = 3;
+    for (0..4) |texture_unit| {
+        const texture_handle = context.texture_units[texture_unit];
+        const texture_env = context.texture_environments[texture_unit];
+        if (texture_handle != 0) {
+            const active_texture = &context.textures.items[texture_handle - 1];
 
-    if (texture_handle != 0) {
-        const active_texture = &context.textures.items[texture_handle - 1];
+            command.image_base[texture_unit] = @ptrCast(active_texture.texture_data.ptr);
+            command.image_descriptor[texture_unit] = active_texture.descriptor;
+            command.texture_environments[texture_unit] = texture_env;
+        } else {
+            //TODO: handle binding texture 0
+            command.image_descriptor[texture_unit].rel_ptr = -1;
+        }
 
-        command.image_base = @ptrCast(active_texture.texture_data.ptr);
-        command.image_descriptor = active_texture.descriptor;
-    } else {
-        //TODO: handle binding texture 0
-        command.image_descriptor.rel_ptr = -1;
-    }
-
-    if (context.enable_texturing == false) {
-        command.image_descriptor.rel_ptr = -1;
+        if (context.enable_texturing == false) {
+            command.image_descriptor[texture_unit].rel_ptr = -1;
+        }
     }
 
     command.flags.enable_alpha_test = context.enable_alpha_test;
     command.flags.enable_scissor_test = context.enable_scissor_test;
     command.flags.enable_depth_test = context.enable_depth_test;
     command.flags.enable_depth_write = context.enable_depth_write;
+    command.flags.enable_backface_cull = context.enable_face_cull;
+    command.flags.enable_blend = context.enable_blend;
+
+    command.blend_state = context.blend_state;
 
     command.scissor_x = context.scissor.x;
     command.scissor_y = context.scissor.y;
@@ -697,7 +853,30 @@ pub export fn glAlphaFunc(func: i32, ref: f32) callconv(.c) void {
     std.log.info("func: {}, ref: {}", .{ func, ref });
 }
 
-pub export fn glBlendFunc() callconv(.c) void {}
+pub export fn glBlendFunc(
+    source_factor: i32,
+    dest_factor: i32,
+) callconv(.c) void {
+    const context = current_context.?;
+
+    context.blend_state.src_factor = switch (source_factor) {
+        GL_ONE => .one,
+        GL_ZERO => .zero,
+        GL_ONE_MINUS_SRC_ALPHA => .one_minus_src_alpha,
+        GL_SRC_ALPHA => .src_alpha,
+        else => @panic("BLEND FUNC VALUE NOT SUPPORTED"),
+    };
+
+    context.blend_state.dst_factor = switch (dest_factor) {
+        GL_ONE => .one,
+        GL_ZERO => .zero,
+        GL_ONE_MINUS_SRC_ALPHA => .one_minus_src_alpha,
+        GL_SRC_ALPHA => .src_alpha,
+        else => @panic("BLEND FUNC VALUE NOT SUPPORTED"),
+    };
+
+    // std.debug.print("source_factor: 0x{x}, dest_factor: 0x{x}\n", .{ source_factor, dest_factor });
+}
 
 pub export fn glHint() callconv(.c) void {}
 
@@ -716,6 +895,12 @@ pub export fn glEnable(cap: i32) callconv(.c) void {
         },
         GL_DEPTH_TEST => {
             context.enable_depth_test = true;
+        },
+        GL_CULL_FACE => {
+            context.enable_face_cull = true;
+        },
+        GL_BLEND => {
+            context.enable_blend = true;
         },
         GL_STENCIL_TEST => {
             @panic("glEnable: Stencil test not supported");
@@ -740,11 +925,15 @@ pub export fn glDisable(cap: i32) callconv(.c) void {
         GL_DEPTH_TEST => {
             context.enable_depth_test = false;
         },
+        GL_CULL_FACE => {
+            context.enable_face_cull = false;
+        },
+        GL_BLEND => {
+            context.enable_blend = false;
+        },
         else => {},
     }
 }
-
-pub export fn glTexEnvf() callconv(.c) void {}
 
 pub export fn glRotatef(angle_degrees: f32, _x: f32, _y: f32, _z: f32) callconv(.c) void {
     const angle = (angle_degrees * std.math.tau) / 360.0;
@@ -1016,15 +1205,29 @@ pub export fn glOrtho(
     const t_y: f32 = -(top + bottom) / (top - bottom);
     const t_z: f32 = -(far_val + near_val) / (far_val - near_val);
 
-    ortho_matrix = .{
-        2 / (right - left), 0,                  0,                         t_x,
-        0,                  2 / (top - bottom), 0,                         t_y,
-        0,                  0,                  -2 / (far_val - near_val), t_z,
-        0,                  0,                  0,                         1,
-    };
+    // ortho_matrix = .{
+    //     2 / (right - left), 0,                  0,                         0,
+    //     0,                  2 / (top - bottom), 0,                         0,
+    //     0,                  0,                  -2 / (far_val - near_val), 0,
+    //     t_x,                t_y,                t_z,                       1,
+    // };
 
-    // glMultMatrixf(&ortho_matrix);
-    glMultTransposeMatrixf(&ortho_matrix);
+    const M = struct {
+        pub inline fn _M(row: usize, col: usize) usize {
+            return col * 4 + row;
+        }
+    }._M;
+
+    // zig fmt: off
+
+    ortho_matrix[M(0,0)] = 2 / (right - left);    ortho_matrix[M(0,1)] = 0.0;  ortho_matrix[M(0,2)] = 0;     ortho_matrix[M(0,3)] = t_x;
+    ortho_matrix[M(1,0)] = 0.0;  ortho_matrix[M(1,1)] = 2 / (top - bottom);    ortho_matrix[M(1,2)] = 0;     ortho_matrix[M(1,3)] = t_y;
+    ortho_matrix[M(2,0)] = 0.0;  ortho_matrix[M(2,1)] = 0.0;  ortho_matrix[M(2,2)] = -2 / (far_val - near_val);     ortho_matrix[M(2,3)] = t_z;
+    ortho_matrix[M(3,0)] = 0.0;  ortho_matrix[M(3,1)] = 0.0;  ortho_matrix[M(3,2)] = 0;  ortho_matrix[M(3,3)] = 1;
+
+    // zig fmt: on
+
+    glMultMatrixf(&ortho_matrix);
 }
 
 pub export fn glVertex3f(x: f32, y: f32, z: f32) callconv(.c) void {
@@ -1087,7 +1290,7 @@ fn flushPrimitives(context: *Context) void {
         .quad_list => {
             const quad_indices: [6]usize = .{
                 0, 1, 2,
-                3, 2, 0,
+                2, 3, 0,
             };
 
             for (0..triangle_count) |triangle_index| {
@@ -1184,7 +1387,24 @@ pub export fn glColor4f(r: f32, g: f32, b: f32, a: f32) callconv(.c) void {
 pub export fn glTexCoord2f(u: f32, v: f32) callconv(.c) void {
     const context = current_context.?;
 
-    context.vertex_uv = .{ u, v };
+    context.vertex_uv[0] = .{ u, v };
+    // context.vertex_uv[context.texture_unit_active] = .{ u, v };
+}
+
+pub export fn glMultiTexCoord2fARB(
+    target: i32,
+    u: f32,
+    v: f32,
+) callconv(.c) void {
+    const context = current_context.?;
+
+    const texture_unit: usize = @intCast(target - GL_TEXTURE0);
+
+    context.vertex_uv[texture_unit] = .{ u, v };
+}
+
+pub export fn glClientActiveTextureARB() callconv(.c) void {
+    @panic("");
 }
 
 pub export fn glVertex2f(x: f32, y: f32) callconv(.c) void {
@@ -1269,8 +1489,9 @@ pub export fn glFlush() callconv(.c) void {
                 .vertex_positions = context.triangle_positions.items,
                 .vertex_colours = context.triangle_colors.items,
                 .vertex_texture_coords = context.triangle_tex_coords.items,
-                .image_base = @ptrCast(draw_command.image_base),
+                .image_base = draw_command.image_base,
                 .image_descriptor = draw_command.image_descriptor,
+                .texture_environments = draw_command.texture_environments,
             };
 
             var triangle_mask: centralgpu.WarpRegister(bool) = @splat(true);
@@ -1318,6 +1539,7 @@ pub export fn glFlush() callconv(.c) void {
                     // .translation_z = 0,
                     // .scale_z = 1,
                 },
+                .backface_cull = draw_command.flags.enable_backface_cull,
             };
 
             const projected_triangles = centralgpu.processGeometry(
@@ -1340,10 +1562,12 @@ pub export fn glFlush() callconv(.c) void {
                     .scissor_max_y = actual_scissor_height,
                     .render_target = context.bound_render_target,
                     .depth_image = context.depth_image.ptr,
+                    .blend_state = context.blend_state,
                     .flags = .{
                         .enable_depth_test = draw_command.flags.enable_depth_test,
                         .enable_alpha_test = draw_command.flags.enable_alpha_test,
                         .enable_depth_write = draw_command.flags.enable_depth_write and draw_command.flags.enable_depth_test,
+                        .enable_blend = draw_command.flags.enable_blend,
                     },
                 },
                 unfiorms,
@@ -1397,8 +1621,6 @@ pub const GL_COLOR: i32 = 0x1800;
 pub const GL_DEPTH: i32 = 0x1801;
 pub const GL_STENCIL: i32 = 0x1802;
 pub const GL_DITHER: i32 = 0x0BD0;
-pub const GL_RGB: i32 = 0x1907;
-pub const GL_RGBA: i32 = 0x1908;
 
 pub const GL_RESCALE_NORMAL: i32 = 0x803A;
 pub const GL_CLAMP_TO_EDGE: i32 = 0x812F;
@@ -1555,10 +1777,6 @@ pub const GL_MODULATE: i32 = 0x2100;
 pub const GL_NEAREST: i32 = 0x2600;
 pub const GL_REPEAT: i32 = 0x2901;
 pub const GL_CLAMP: i32 = 0x2900;
-pub const GL_S: i32 = 0x2000;
-pub const GL_T: i32 = 0x2001;
-pub const GL_R: i32 = 0x2002;
-pub const GL_Q: i32 = 0x2003;
 
 pub const GL_FOG: i32 = 0x0B60;
 pub const GL_FOG_MODE: i32 = 0x0B65;
@@ -1631,6 +1849,123 @@ pub const GL_LIST_BIT: i32 = 0x00020000;
 pub const GL_TEXTURE_BIT: i32 = 0x00040000;
 pub const GL_SCISSOR_BIT: i32 = 0x00080000;
 pub const GL_ALL_ATTRIB_BITS: i32 = 0x000FFFFF;
+
+pub const GL_RG: i32 = 0x8227;
+pub const GL_RG16: i32 = 0x822C;
+pub const GL_RG16F: i32 = 0x822F;
+pub const GL_RG16I: i32 = 0x8239;
+pub const GL_RG16UI: i32 = 0x823A;
+pub const GL_RG16_SNORM: i32 = 0x8F99;
+pub const GL_RG32F: i32 = 0x8230;
+pub const GL_RG32I: i32 = 0x823B;
+pub const GL_RG32UI: i32 = 0x823C;
+pub const GL_RG8: i32 = 0x822B;
+pub const GL_RG8I: i32 = 0x8237;
+pub const GL_RG8UI: i32 = 0x8238;
+pub const GL_RG8_SNORM: i32 = 0x8F95;
+pub const GL_RGB: i32 = 0x1907;
+pub const GL_RGB10: i32 = 0x8052;
+pub const GL_RGB10_A2: i32 = 0x8059;
+pub const GL_RGB10_A2UI: i32 = 0x906F;
+pub const GL_RGB12: i32 = 0x8053;
+pub const GL_RGB16: i32 = 0x8054;
+pub const GL_RGB16F: i32 = 0x881B;
+pub const GL_RGB16I: i32 = 0x8D89;
+pub const GL_RGB16UI: i32 = 0x8D77;
+pub const GL_RGB16_SNORM: i32 = 0x8F9A;
+pub const GL_RGB32F: i32 = 0x8815;
+pub const GL_RGB32I: i32 = 0x8D83;
+pub const GL_RGB32UI: i32 = 0x8D71;
+pub const GL_RGB4: i32 = 0x804F;
+pub const GL_RGB5: i32 = 0x8050;
+pub const GL_RGB5_A1: i32 = 0x8057;
+pub const GL_RGB8: i32 = 0x8051;
+pub const GL_RGB8I: i32 = 0x8D8F;
+pub const GL_RGB8UI: i32 = 0x8D7D;
+pub const GL_RGB8_SNORM: i32 = 0x8F96;
+pub const GL_RGB9_E5: i32 = 0x8C3D;
+pub const GL_RGBA: i32 = 0x1908;
+pub const GL_RGBA12: i32 = 0x805A;
+pub const GL_RGBA16: i32 = 0x805B;
+pub const GL_RGBA16F: i32 = 0x881A;
+pub const GL_RGBA16I: i32 = 0x8D88;
+pub const GL_RGBA16UI: i32 = 0x8D76;
+pub const GL_RGBA16_SNORM: i32 = 0x8F9B;
+pub const GL_RGBA2: i32 = 0x8055;
+pub const GL_RGBA32F: i32 = 0x8814;
+pub const GL_RGBA32I: i32 = 0x8D82;
+pub const GL_RGBA32UI: i32 = 0x8D70;
+pub const GL_RGBA4: i32 = 0x8056;
+pub const GL_RGBA8: i32 = 0x8058;
+pub const GL_RGBA8I: i32 = 0x8D8E;
+pub const GL_RGBA8UI: i32 = 0x8D7C;
+pub const GL_RGBA8_SNORM: i32 = 0x8F97;
+pub const GL_RGBA_INTEGER: i32 = 0x8D99;
+pub const GL_RGBA_MODE: i32 = 0x0C31;
+pub const GL_RGB_INTEGER: i32 = 0x8D98;
+
+pub const GL_POINT: i32 = 0x1B00;
+pub const GL_LINE: i32 = 0x1B01;
+pub const GL_FILL: i32 = 0x1B02;
+pub const GL_CW: i32 = 0x0900;
+pub const GL_CCW: i32 = 0x0901;
+pub const GL_FRONT: i32 = 0x0404;
+pub const GL_BACK: i32 = 0x0405;
+pub const GL_POLYGON_MODE: i32 = 0x0B40;
+pub const GL_POLYGON_SMOOTH: i32 = 0x0B41;
+pub const GL_POLYGON_STIPPLE: i32 = 0x0B42;
+pub const GL_EDGE_FLAG: i32 = 0x0B43;
+pub const GL_CULL_FACE: i32 = 0x0B44;
+pub const GL_CULL_FACE_MODE: i32 = 0x0B45;
+pub const GL_FRONT_FACE: i32 = 0x0B46;
+pub const GL_POLYGON_OFFSET_FACTOR: i32 = 0x8038;
+pub const GL_POLYGON_OFFSET_UNITS: i32 = 0x2A00;
+pub const GL_POLYGON_OFFSET_POINT: i32 = 0x2A01;
+pub const GL_POLYGON_OFFSET_LINE: i32 = 0x2A02;
+pub const GL_POLYGON_OFFSET_FILL: i32 = 0x8037;
+
+pub const GL_BLEND: i32 = 0x0BE2;
+pub const GL_BLEND_SRC: i32 = 0x0BE1;
+pub const GL_BLEND_DST: i32 = 0x0BE0;
+pub const GL_ZERO: i32 = 0;
+pub const GL_ONE: i32 = 1;
+pub const GL_SRC_COLOR: i32 = 0x0300;
+pub const GL_ONE_MINUS_SRC_COLOR: i32 = 0x0301;
+pub const GL_SRC_ALPHA: i32 = 0x0302;
+pub const GL_ONE_MINUS_SRC_ALPHA: i32 = 0x0303;
+pub const GL_DST_ALPHA: i32 = 0x0304;
+pub const GL_ONE_MINUS_DST_ALPHA: i32 = 0x0305;
+pub const GL_DST_COLOR: i32 = 0x0306;
+pub const GL_ONE_MINUS_DST_COLOR: i32 = 0x0307;
+pub const GL_SRC_ALPHA_SATURATE: i32 = 0x0308;
+
+pub const GL_ACCUM: i32 = 0x0100;
+pub const GL_ADD: i32 = 0x0104;
+pub const GL_LOAD: i32 = 0x0101;
+pub const GL_MULT: i32 = 0x0103;
+
+pub const GL_COMBINE: i32 = 0x8570;
+pub const GL_COMBINE_RGB: i32 = 0x8571;
+pub const GL_COMBINE_ALPHA: i32 = 0x8572;
+pub const GL_SOURCE0_RGB: i32 = 0x8580;
+pub const GL_SOURCE1_RGB: i32 = 0x8581;
+pub const GL_SOURCE2_RGB: i32 = 0x8582;
+pub const GL_SOURCE0_ALPHA: i32 = 0x8588;
+pub const GL_SOURCE1_ALPHA: i32 = 0x8589;
+pub const GL_SOURCE2_ALPHA: i32 = 0x858A;
+pub const GL_OPERAND0_RGB: i32 = 0x8590;
+pub const GL_OPERAND1_RGB: i32 = 0x8591;
+pub const GL_OPERAND2_RGB: i32 = 0x8592;
+pub const GL_OPERAND0_ALPHA: i32 = 0x8598;
+pub const GL_OPERAND1_ALPHA: i32 = 0x8599;
+pub const GL_OPERAND2_ALPHA: i32 = 0x859A;
+pub const GL_RGB_SCALE: i32 = 0x8573;
+pub const GL_ADD_SIGNED: i32 = 0x8574;
+pub const GL_INTERPOLATE: i32 = 0x8575;
+pub const GL_SUBTRACT: i32 = 0x84E7;
+pub const GL_CONSTANT: i32 = 0x8576;
+pub const GL_PRIMARY_COLOR: i32 = 0x8577;
+pub const GL_PREVIOUS: i32 = 0x8578;
 
 const log = std.log.scoped(.centralgpu_gl);
 const std = @import("std");
