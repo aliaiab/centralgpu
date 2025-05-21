@@ -84,6 +84,7 @@ pub const Context = struct {
     enable_depth_write: bool = false,
     enable_face_cull: bool = false,
     enable_blend: bool = false,
+    invert_depth_test: bool = false,
 
     blend_state: centralgpu.BlendState = .{
         .src_factor = .one,
@@ -138,7 +139,8 @@ const DrawCommandState = struct {
         enable_depth_write: bool,
         enable_blend: bool,
         enable_backface_cull: bool,
-        _: u2,
+        invert_depth_test: bool,
+        _: u1,
     };
 };
 
@@ -189,7 +191,21 @@ pub export fn glDepthRange(
     context.depth_max = @floatCast(far_val);
 }
 
-pub export fn glDepthFunc() callconv(.c) void {}
+pub export fn glDepthFunc(
+    func: i32,
+) callconv(.c) void {
+    const context = current_context.?;
+
+    switch (func) {
+        GL_LEQUAL => {
+            context.invert_depth_test = false;
+        },
+        GL_GEQUAL => {
+            context.invert_depth_test = true;
+        },
+        else => {},
+    }
+}
 
 pub export fn glDepthMask(
     flag: bool,
@@ -1568,6 +1584,7 @@ pub export fn glFlush() callconv(.c) void {
                         .enable_alpha_test = draw_command.flags.enable_alpha_test,
                         .enable_depth_write = draw_command.flags.enable_depth_write and draw_command.flags.enable_depth_test,
                         .enable_blend = draw_command.flags.enable_blend,
+                        .invert_depth_test = draw_command.flags.invert_depth_test,
                     },
                 },
                 unfiorms,
@@ -1793,22 +1810,6 @@ pub const GL_ALPHA_TEST: i32 = 0x0BC0;
 pub const GL_ALPHA_TEST_REF: i32 = 0x0BC2;
 pub const GL_ALPHA_TEST_FUNC: i32 = 0x0BC1;
 
-pub const GL_NEVER: i32 = 0x0200;
-pub const GL_LESS: i32 = 0x0201;
-pub const GL_EQUAL: i32 = 0x0202;
-pub const GL_LEQUAL: i32 = 0x0203;
-pub const GL_GREATER: i32 = 0x0204;
-pub const GL_NOTEQUAL: i32 = 0x0205;
-pub const GL_GEQUAL: i32 = 0x0206;
-pub const GL_ALWAYS: i32 = 0x0207;
-pub const GL_DEPTH_TEST: i32 = 0x0B71;
-pub const GL_DEPTH_BITS: i32 = 0x0D56;
-pub const GL_DEPTH_CLEAR_VALUE: i32 = 0x0B73;
-pub const GL_DEPTH_FUNC: i32 = 0x0B74;
-pub const GL_DEPTH_RANGE: i32 = 0x0B70;
-pub const GL_DEPTH_WRITEMASK: i32 = 0x0B72;
-pub const GL_DEPTH_COMPONENT: i32 = 0x1902;
-
 pub const GL_SCISSOR_BOX: i32 = 0x0C10;
 pub const GL_SCISSOR_TEST: i32 = 0x0C11;
 
@@ -1966,6 +1967,22 @@ pub const GL_SUBTRACT: i32 = 0x84E7;
 pub const GL_CONSTANT: i32 = 0x8576;
 pub const GL_PRIMARY_COLOR: i32 = 0x8577;
 pub const GL_PREVIOUS: i32 = 0x8578;
+
+pub const GL_NEVER: i32 = 0x0200;
+pub const GL_LESS: i32 = 0x0201;
+pub const GL_EQUAL: i32 = 0x0202;
+pub const GL_LEQUAL: i32 = 0x0203;
+pub const GL_GREATER: i32 = 0x0204;
+pub const GL_NOTEQUAL: i32 = 0x0205;
+pub const GL_GEQUAL: i32 = 0x0206;
+pub const GL_ALWAYS: i32 = 0x0207;
+pub const GL_DEPTH_TEST: i32 = 0x0B71;
+pub const GL_DEPTH_BITS: i32 = 0x0D56;
+pub const GL_DEPTH_CLEAR_VALUE: i32 = 0x0B73;
+pub const GL_DEPTH_FUNC: i32 = 0x0B74;
+pub const GL_DEPTH_RANGE: i32 = 0x0B70;
+pub const GL_DEPTH_WRITEMASK: i32 = 0x0B72;
+pub const GL_DEPTH_COMPONENT: i32 = 0x1902;
 
 const log = std.log.scoped(.centralgpu_gl);
 const std = @import("std");

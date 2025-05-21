@@ -20,3 +20,8 @@ Triangle setup is done 8-wide just as is done in geometric processing.
 The rasterizer itself shades pixels in pairs of 2x2 'quads'. This allows for partial derivatives to 
 be computed which is essential for doing mipmapping.
 
+## centralgl
+
+"A quake accelerator"
+
+An implementation of OpenGL 1.5 and assorted extensions. Mostly built to run games from derivatives of id tech 1 (the original quake engine).
