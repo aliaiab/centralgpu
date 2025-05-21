@@ -423,7 +423,8 @@ pub const RasterState = struct {
         enable_depth_test: bool,
         enable_depth_write: bool,
         enable_blend: bool,
-        _: u28 = 0,
+        invert_depth_test: bool,
+        _: u27 = 0,
     };
 };
 
@@ -816,7 +817,11 @@ pub fn rasterizeTriangle(
 
                     const depth_difference = pixel_z - previous_depth;
 
-                    execution_mask &= @intFromBool(depth_difference <= @as(WarpRegister(f32), @splat(0)));
+                    if (raster_state.flags.invert_depth_test) {
+                        execution_mask &= @intFromBool(depth_difference >= @as(WarpRegister(f32), @splat(0)));
+                    } else {
+                        execution_mask &= @intFromBool(depth_difference <= @as(WarpRegister(f32), @splat(0)));
+                    }
                 }
 
                 if (@reduce(.Or, execution_mask) == 0) {
@@ -829,10 +834,7 @@ pub fn rasterizeTriangle(
                 const color_a = bary_0 * vertex_color_0.w + bary_1 * vertex_color_1.w + bary_2 * vertex_color_2.w;
 
                 const color: WarpVec4(f32) = .{ .x = color_r, .y = color_g, .z = color_b, .w = color_a };
-                // const color = packUnorm4x(.{ .x = tex_u, .y = tex_v, .z = @splat(0), .w = @splat(1) });
-                // const color = packUnorm4x(.{ .x = texture_sample.x, .y = texture_sample.y, .z = texture_sample.z, .w = @splat(1) });
 
-                // var color_result: WarpVec4(f32) = texture_sample;
                 var color_result: WarpVec4(f32) = color;
 
                 color_result = color_result;
@@ -886,30 +888,6 @@ pub fn rasterizeTriangle(
                 }
 
                 color_result = .hadamardProduct(resultant_sample, color_result);
-
-                // color_result.x = @splat(@floatFromInt(triangle_id % 10));
-                // color_result.x /= @splat(10);
-                // color_result.y = @splat(@floatFromInt(triangle_id % 100));
-                // color_result.y /= @splat(100);
-                // color_result.z = @splat(1);
-                // color_result.w = @splat(1);
-
-                // color_result.x = tex_u;
-                // color_result.y = tex_v;
-
-                // color_result.x = pixel_z;
-                // color_result.y = pixel_z;
-                // color_result.z = pixel_z;
-
-                // color_result.x *= @splat(0.001);
-                // color_result.y *= @splat(0.001);
-                // color_result.z *= @splat(0.001);
-
-                // color_result.x = @splat(@floatFromInt(triangle_id % 200));
-                // color_result.x /= @splat(200);
-                // color_result.y = @splat(0);
-                // color_result.z = @splat(0);
-                // color_result.w = @splat(1);
 
                 if (raster_state.flags.enable_alpha_test) {
                     //alpha test

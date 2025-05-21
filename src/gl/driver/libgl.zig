@@ -33,6 +33,12 @@ export fn glGetString(name: i32) callconv(.c) [*:0]const u8 {
                 .width = @intCast(target_width),
                 .height = @intCast(target_height),
             },
+            .scissor = .{
+                .x = 0,
+                .y = 0,
+                .width = @intCast(target_width),
+                .height = @intCast(target_height),
+            },
         };
 
         initWayland() catch |e| {
