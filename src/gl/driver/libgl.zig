@@ -11,14 +11,14 @@ const WaylandContext = struct {
     wm_base: ?*xdg.WmBase,
 };
 
+const target_width = 1024;
+const target_height = 768;
+
 export fn glGetString(name: i32) callconv(.c) [*:0]const u8 {
     const gpa = std.heap.smp_allocator;
 
     if (centralgpu_gl.current_context == null) {
         centralgpu_gl.current_context = gpa.create(centralgpu_gl.Context) catch @panic("oom");
-
-        const target_width = 800;
-        const target_height = 600;
 
         const target_buf = gpa.alloc(centralgpu.Rgba32, target_width * target_height) catch @panic("oom");
 
@@ -48,16 +48,38 @@ export fn glGetString(name: i32) callconv(.c) [*:0]const u8 {
             return "CENTRAL_GPU_RASTER";
         },
         gl_c.GL_VERSION => {
-            return "1.3.0";
+            return "1.5.0";
         },
         gl_c.GL_EXTENSIONS => {
-            return "";
+            return "GL_ARB_multitexture GL_ARB_texture_env_combine GL_ARB_texture_env_add";
+            // return "";
         },
         else => {
             std.log.info("glGetString: name = {}", .{name});
             @panic("Unsupported gl string");
         },
     }
+}
+
+//Hack to get quakespasm to work
+pub export fn SDL_GL_GetProcAddress(
+    proc_name: [*:0]const u8,
+) ?*const anyopaque {
+    const proc_map = std.static_string_map.StaticStringMap(*const anyopaque).initComptime(.{
+        .{ "glMultiTexCoord2fARB", &centralgpu_gl.glMultiTexCoord2fARB },
+        .{ "glActiveTextureARB", &centralgpu_gl.glActiveTexture },
+        .{ "glClientActiveTextureARB", &centralgpu_gl.glClientActiveTextureARB },
+    });
+
+    std.log.info("(centralgl) TRYING TO LOAD: {s}", .{proc_name});
+
+    if (proc_map.get(std.mem.span(proc_name))) |proc| {
+        return proc;
+    } else {
+        std.log.info("(centralgl) FAILED TO LOAD: {s}", .{proc_name});
+        return null;
+    }
+    return null;
 }
 
 var wayland_state: struct {
@@ -87,8 +109,8 @@ export fn glXCreateContextAttribsARB() void {
 fn glFlushCallback() void {
     std.log.info("wayland_state: {}, {}, {}", .{ wayland_state.display, wayland_state.surface, wayland_state.buffer });
 
-    const surface_width: usize = @intCast(800);
-    const surface_height: usize = @intCast(600);
+    const surface_width: usize = @intCast(target_width);
+    const surface_height: usize = @intCast(target_height);
 
     const pixel_ptr: [*]centralgpu.XRgb888 = @ptrCast(@alignCast(wayland_state.out_pixel_buffer.ptr));
 
@@ -96,7 +118,9 @@ fn glFlushCallback() void {
         centralgpu_gl.current_context.?.bound_render_target.pixel_ptr,
         pixel_ptr,
         centralgpu_gl.current_context.?.bound_render_target.width,
-        centralgpu_gl.current_context.?.bound_render_target.height,
+        // centralgpu_gl.current_context.?.bound_render_target.height,
+        640,
+        480,
         surface_width,
         surface_height,
     );
@@ -148,8 +172,8 @@ fn initWayland() !void {
     xdg_surface.setListener(*wl.Surface, xdgSurfaceListener, surface);
     xdg_toplevel.setListener(*bool, xdgToplevelListener, &wayland_state.running);
 
-    const width = 800;
-    const height = 600;
+    const width = target_width;
+    const height = target_height;
     const stride = width * 4;
     const size = stride * height;
 

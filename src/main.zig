@@ -347,6 +347,7 @@ pub fn main() !void {
                         target_buffer.ptr,
                         pixel_ptr,
                         render_target_width,
+                        render_target_width,
                         render_target_height,
                         surface_width,
                         surface_height,

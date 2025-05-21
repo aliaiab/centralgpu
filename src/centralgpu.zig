@@ -36,10 +36,13 @@ pub const Image = struct {
     }
 };
 
+///A Combined Image/Sampler that points to multiple image mip lod levels
 pub const ImageDescriptor = packed struct(u64) {
     rel_ptr: i32,
     width_log2: u4,
     height_log2: u4,
+    min_mip_level: u4 = 0,
+    max_mip_level: u4 = 0,
     sampler_filter: enum(u1) {
         nearest,
         bilinear,
@@ -52,7 +55,7 @@ pub const ImageDescriptor = packed struct(u64) {
     ///Specifies how the border colour should be shifted
     ///border_colour = 0xff_ff_ff_ff << (border_colour_shift_amount << 3)
     border_colour_shift_amount: u3,
-    _: u18 = 0,
+    _: u10 = 0,
 };
 
 const warp_register_len = std.simd.suggestVectorLength(u32).?;
@@ -130,6 +133,15 @@ pub fn WarpVec4(comptime T: type) type {
                 .y = @splat(values[1]),
                 .z = @splat(values[2]),
                 .w = @splat(values[3]),
+            };
+        }
+
+        pub inline fn splat(value: WarpRegister(T)) @This() {
+            return .{
+                .x = value,
+                .y = value,
+                .z = value,
+                .w = value,
             };
         }
 
@@ -245,10 +257,11 @@ pub const WarpProjectedTriangle = struct {
 pub const Uniforms = struct {
     vertex_positions: []const [3]WarpVec4(f32),
     vertex_colours: []const [3]u32,
-    vertex_texture_coords: []const [3][2]f32,
+    vertex_texture_coords: []const [3][4][2]f32,
 
-    image_base: [*]const u8,
-    image_descriptor: ImageDescriptor,
+    image_base: [4][*]const u8,
+    image_descriptor: [4]ImageDescriptor,
+    texture_environments: [4]TextureEnvironment,
 };
 
 pub const GeometryProcessState = struct {
@@ -260,6 +273,7 @@ pub const GeometryProcessState = struct {
         translation_y: f32,
         translation_z: f32,
     },
+    backface_cull: bool,
 };
 
 pub fn processGeometry(
@@ -283,6 +297,7 @@ pub fn processGeometry(
             .y = in_triangle[vertex_index].y,
             .z = in_triangle[vertex_index].z,
             .w = in_triangle[vertex_index].w,
+            // .w = @splat(1),
         };
 
         //mostly for debugging
@@ -367,7 +382,9 @@ pub fn processGeometry(
     }
 
     if (homogenous_raster == false) {
-        out_mask = vectorBoolAnd(out_mask, vectorBoolNot(backface_culled));
+        if (state.backface_cull) {
+            out_mask = vectorBoolAnd(out_mask, vectorBoolNot(backface_culled));
+        }
     }
 
     return .{
@@ -376,6 +393,19 @@ pub fn processGeometry(
     };
 }
 
+pub const BlendState = packed struct(u32) {
+    src_factor: BlendConstant,
+    dst_factor: BlendConstant,
+    _: u28 = 0,
+
+    pub const BlendConstant = enum(u2) {
+        one,
+        zero,
+        one_minus_src_alpha,
+        src_alpha,
+    };
+};
+
 pub const RasterState = struct {
     scissor_min_x: i32,
     scissor_min_y: i32,
@@ -383,6 +413,7 @@ pub const RasterState = struct {
     scissor_max_y: i32,
 
     flags: Flags,
+    blend_state: BlendState,
 
     render_target: Image,
     depth_image: [*]f32,
@@ -391,7 +422,19 @@ pub const RasterState = struct {
         enable_alpha_test: bool,
         enable_depth_test: bool,
         enable_depth_write: bool,
-        _: u29 = 0,
+        enable_blend: bool,
+        _: u28 = 0,
+    };
+};
+
+pub const TextureEnvironment = struct {
+    rgb_scale: f32 = 1,
+    function: Function = .modulate,
+
+    pub const Function = enum {
+        modulate,
+        replace,
+        add,
     };
 };
 
@@ -654,14 +697,6 @@ pub fn rasterizeTriangle(
     const vertex_color_1 = unpackUnorm4x(vertex_color_1_packed);
     const vertex_color_2 = unpackUnorm4x(vertex_color_2_packed);
 
-    const vertex_texcoord_u_0: WarpRegister(f32) = @splat(uniforms.vertex_texture_coords[triangle_id][0][0]);
-    const vertex_texcoord_u_1: WarpRegister(f32) = @splat(uniforms.vertex_texture_coords[triangle_id][1][0]);
-    const vertex_texcoord_u_2: WarpRegister(f32) = @splat(uniforms.vertex_texture_coords[triangle_id][2][0]);
-
-    const vertex_texcoord_v_0: WarpRegister(f32) = @splat(uniforms.vertex_texture_coords[triangle_id][0][1]);
-    const vertex_texcoord_v_1: WarpRegister(f32) = @splat(uniforms.vertex_texture_coords[triangle_id][1][1]);
-    const vertex_texcoord_v_2: WarpRegister(f32) = @splat(uniforms.vertex_texture_coords[triangle_id][2][1]);
-
     const block_count_x = raster_state.render_target.width / block_width + @intFromBool(raster_state.render_target.width % block_width != 0);
 
     var block_y: isize = block_start_y;
@@ -748,6 +783,10 @@ pub fn rasterizeTriangle(
                 execution_mask &= @intFromBool(bary_1 >= @as(WarpRegister(f32), @splat(0)));
                 execution_mask &= @intFromBool(bary_2 >= @as(WarpRegister(f32), @splat(0)));
 
+                if (@reduce(.Or, execution_mask) == 0) {
+                    continue;
+                }
+
                 const fragment_recip_w = bary_0 * vertex_recip_w_0 + bary_1 * vertex_recip_w_1 + bary_2 * vertex_recip_w_2;
 
                 const recip_z = bary_0 * recip_z_0 + bary_1 * recip_z_1 + bary_2 * recip_z_2;
@@ -784,9 +823,6 @@ pub fn rasterizeTriangle(
                     continue;
                 }
 
-                const tex_u = bary_0 * vertex_texcoord_u_0 + bary_1 * vertex_texcoord_u_1 + bary_2 * vertex_texcoord_u_2;
-                const tex_v = bary_0 * vertex_texcoord_v_0 + bary_1 * vertex_texcoord_v_1 + bary_2 * vertex_texcoord_v_2;
-
                 const color_r = bary_0 * vertex_color_0.x + bary_1 * vertex_color_1.x + bary_2 * vertex_color_2.x;
                 const color_g = bary_0 * vertex_color_0.y + bary_1 * vertex_color_1.y + bary_2 * vertex_color_2.y;
                 const color_b = bary_0 * vertex_color_0.z + bary_1 * vertex_color_1.z + bary_2 * vertex_color_2.z;
@@ -801,16 +837,55 @@ pub fn rasterizeTriangle(
 
                 color_result = color_result;
 
-                if (uniforms.image_descriptor.rel_ptr != -1) {
-                    const texture_sample = quadImageSample(
-                        execution_mask != @as(WarpRegister(u1), @splat(0)),
-                        @ptrCast(@alignCast(uniforms.image_base)),
-                        uniforms.image_descriptor,
-                        .{ .x = tex_u, .y = tex_v },
-                    );
+                var resultant_sample: WarpVec4(f32) = .init(.{ 1, 1, 1, 1 });
 
-                    color_result = .hadamardProduct(color_result, texture_sample);
+                for (uniforms.image_descriptor, uniforms.image_base, 0..) |image_descriptor, image_base, texture_unit| {
+                    if (image_descriptor.rel_ptr != -1) {
+                        const vertex_texcoord_u_0: WarpRegister(f32) = @splat(uniforms.vertex_texture_coords[triangle_id][0][texture_unit][0]);
+                        const vertex_texcoord_u_1: WarpRegister(f32) = @splat(uniforms.vertex_texture_coords[triangle_id][1][texture_unit][0]);
+                        const vertex_texcoord_u_2: WarpRegister(f32) = @splat(uniforms.vertex_texture_coords[triangle_id][2][texture_unit][0]);
+
+                        const vertex_texcoord_v_0: WarpRegister(f32) = @splat(uniforms.vertex_texture_coords[triangle_id][0][texture_unit][1]);
+                        const vertex_texcoord_v_1: WarpRegister(f32) = @splat(uniforms.vertex_texture_coords[triangle_id][1][texture_unit][1]);
+                        const vertex_texcoord_v_2: WarpRegister(f32) = @splat(uniforms.vertex_texture_coords[triangle_id][2][texture_unit][1]);
+
+                        const tex_u = bary_0 * vertex_texcoord_u_0 + bary_1 * vertex_texcoord_u_1 + bary_2 * vertex_texcoord_u_2;
+                        const tex_v = bary_0 * vertex_texcoord_v_0 + bary_1 * vertex_texcoord_v_1 + bary_2 * vertex_texcoord_v_2;
+
+                        const texture_environment = uniforms.texture_environments[texture_unit];
+
+                        var texture_sample = quadImageSample(
+                            execution_mask != @as(WarpRegister(u1), @splat(0)),
+                            @ptrCast(@alignCast(image_base)),
+                            image_descriptor,
+                            .{ .x = tex_u, .y = tex_v },
+                        );
+
+                        texture_sample.x *= @splat(uniforms.texture_environments[texture_unit].rgb_scale);
+                        texture_sample.y *= @splat(uniforms.texture_environments[texture_unit].rgb_scale);
+                        texture_sample.z *= @splat(uniforms.texture_environments[texture_unit].rgb_scale);
+
+                        switch (texture_environment.function) {
+                            .modulate => {
+                                resultant_sample.x *= texture_sample.x;
+                                resultant_sample.y *= texture_sample.y;
+                                resultant_sample.z *= texture_sample.z;
+                                resultant_sample.w *= texture_sample.w;
+                            },
+                            .replace => {
+                                resultant_sample = texture_sample;
+                            },
+                            .add => {
+                                resultant_sample.x = resultant_sample.x + texture_sample.x;
+                                resultant_sample.y = resultant_sample.y + texture_sample.y;
+                                resultant_sample.z = resultant_sample.z + texture_sample.z;
+                                resultant_sample.w *= texture_sample.w;
+                            },
+                        }
+                    }
                 }
+
+                color_result = .hadamardProduct(resultant_sample, color_result);
 
                 // color_result.x = @splat(@floatFromInt(triangle_id % 10));
                 // color_result.x /= @splat(10);
@@ -841,8 +916,50 @@ pub fn rasterizeTriangle(
                     execution_mask &= (@intFromBool(color_result.w > @as(WarpRegister(f32), @splat(0.01))));
                 }
 
+                if (raster_state.flags.enable_blend) {
+                    const previous_colour_packed = maskedLoad(
+                        u32,
+                        execution_mask != @as(WarpRegister(u1), @splat(0)),
+                        @ptrCast(@alignCast(target_start_ptr)),
+                    );
+
+                    const previous_colour = unpackUnorm4x(previous_colour_packed);
+
+                    var output_colour: WarpVec4(f32) = color_result;
+
+                    {
+                        const destination_colour = previous_colour;
+                        const source_colour = color_result;
+
+                        const one: WarpVec4(f32) = .splat(@splat(1));
+                        const zero: WarpVec4(f32) = .splat(@splat(0));
+                        const one_minus_src_alpha: WarpVec4(f32) = .splat(@as(WarpRegister(f32), @splat(1)) - source_colour.w);
+                        const source_alpha: WarpVec4(f32) = .splat(source_colour.w);
+
+                        var source_factor: WarpVec4(f32) = one;
+                        var dest_factor: WarpVec4(f32) = one_minus_src_alpha;
+
+                        source_factor = switch (raster_state.blend_state.src_factor) {
+                            .one => one,
+                            .zero => zero,
+                            .one_minus_src_alpha => one_minus_src_alpha,
+                            .src_alpha => source_alpha,
+                        };
+
+                        dest_factor = switch (raster_state.blend_state.dst_factor) {
+                            .one => one,
+                            .zero => zero,
+                            .one_minus_src_alpha => one_minus_src_alpha,
+                            .src_alpha => source_alpha,
+                        };
+
+                        output_colour = source_colour.hadamardProduct(source_factor).add(destination_colour.hadamardProduct(dest_factor));
+                    }
+
+                    color_result = output_colour;
+                }
+
                 const packed_color = packUnorm4x(color_result);
-                // const packed_color: WarpRegister(u32) = @splat(std.math.maxInt(u32));
 
                 maskedStore(
                     u32,
@@ -1140,9 +1257,11 @@ pub inline fn imageSampleDerivative(
         // };
     }
 
+    const level: WarpRegister(u32) = @intFromFloat(mip_level);
+
     switch (descriptor.sampler_filter) {
-        .nearest => return imageSampleNearest(execution_mask, base, descriptor, uv),
-        .bilinear => return imageSampleBilinear(execution_mask, base, descriptor, uv),
+        .nearest => return imageSampleNearest(execution_mask, base, descriptor, level, uv),
+        .bilinear => return imageSampleBilinear(execution_mask, base, descriptor, level, uv),
     }
 }
 
@@ -1151,6 +1270,7 @@ pub inline fn imageSampleBilinear(
     ///Base address from which the descriptor loads
     base: [*]const u32,
     descriptor: ImageDescriptor,
+    level: WarpRegister(u32),
     uv: WarpVec2(f32),
 ) WarpVec4(f32) {
     @setRuntimeSafety(false);
@@ -1202,36 +1322,28 @@ pub inline fn imageSampleBilinear(
         execution_mask,
         base,
         descriptor,
+        level,
         sample_loc_0,
     );
     const texel_1 = imageLoad(
         execution_mask,
         base,
         descriptor,
-        // .{
-        // .x = texel_point_x + @as(WarpRegister(i32), @splat(1)),
-        // .y = texel_point_y + @as(WarpRegister(i32), @splat(0)),
-        // },
+        level,
         sample_loc_1,
     );
     const texel_2 = imageLoad(
         execution_mask,
         base,
         descriptor,
-        // .{
-        // .x = texel_point_x + @as(WarpRegister(i32), @splat(0)),
-        // .y = texel_point_y + @as(WarpRegister(i32), @splat(1)),
-        // },
+        level,
         sample_loc_2,
     );
     const texel_3 = imageLoad(
         execution_mask,
         base,
         descriptor,
-        // .{
-        // .x = texel_point_x + @as(WarpRegister(i32), @splat(1)),
-        // .y = texel_point_y + @as(WarpRegister(i32), @splat(1)),
-        // },
+        level,
         sample_loc_3,
     );
 
@@ -1268,6 +1380,7 @@ pub inline fn imageSampleNearest(
     ///Base address from which the descriptor loads
     base: [*]const u32,
     descriptor: ImageDescriptor,
+    level: WarpRegister(u32),
     uv: WarpVec2(f32),
 ) WarpVec4(f32) {
     @setRuntimeSafety(false);
@@ -1278,6 +1391,7 @@ pub inline fn imageSampleNearest(
         execution_mask,
         base,
         descriptor,
+        level,
         texel_location,
     );
     const sample = unpackUnorm4x(sample_packed);
@@ -1289,12 +1403,14 @@ pub inline fn imageLoad(
     ///Base address from which the descriptor loads
     base: [*]const u32,
     descriptor: ImageDescriptor,
+    ///Specify the mip level to sample from
+    level: WarpRegister(u32),
     ///Image coordinates
     physical_position: WarpVec2(i32),
 ) WarpRegister(u32) {
     @setRuntimeSafety(false);
 
-    const pixel_address = imageAddress(descriptor, physical_position.x, physical_position.y);
+    const pixel_address = imageAddress(descriptor, level, physical_position.x, physical_position.y);
 
     //0: opaque white
     //2: cyan
@@ -1384,15 +1500,28 @@ pub inline fn imageSamplerAddress(
 ///Computes the address of a pixel relative to the image level base from its x and y coordinates
 pub inline fn imageAddress(
     descriptor: ImageDescriptor,
+    level: WarpRegister(u32),
     x: WarpRegister(i32),
     y: WarpRegister(i32),
 ) WarpRegister(u32) {
+    _ = level; // autofix
     _ = descriptor; // autofix
     @setRuntimeSafety(false);
 
-    //TODO: potentially allow for linear images and/or other tiling schemes
+    const level_base: WarpRegister(u32) = undefined;
+    _ = level_base; // autofix
 
-    const pixel_address = mortonEncode(@intCast(x), @intCast(y));
+    var physical_x: WarpRegister(u32) = @intCast(x);
+    var physical_y: WarpRegister(u32) = @intCast(y);
+
+    physical_x = physical_x;
+    physical_y = physical_y;
+
+    //Map from logical addresses [0..width], [0..height] to physical mid addresses [0..mip_width, 0..mip_height]
+    // physical_x >>= @intCast(level);
+    // physical_y >>= @intCast(level);
+
+    const pixel_address = mortonEncode(physical_x, physical_y);
 
     return pixel_address;
 }
@@ -1467,6 +1596,7 @@ pub fn vectorBoolNot(a: WarpRegister(bool)) WarpRegister(bool) {
 pub fn blitRasterTargetToLinear(
     src_pixels: [*]const Rgba32,
     dst_pixels: [*]XRgb888,
+    src_pitch_width: usize,
     src_width: usize,
     src_height: usize,
     dst_width: usize,
@@ -1475,7 +1605,7 @@ pub fn blitRasterTargetToLinear(
     const block_width: usize = 4;
     const block_height: usize = block_width;
 
-    const block_count_x: usize = @divTrunc(src_width, block_width) + @intFromBool(@rem(src_width, block_width) != 0);
+    const block_count_x: usize = @divTrunc(src_pitch_width, block_width) + @intFromBool(@rem(src_pitch_width, block_width) != 0);
 
     const scale_x: f32 = @as(f32, @floatFromInt(src_width)) / @as(f32, @floatFromInt(dst_width));
     const scale_y: f32 = @as(f32, @floatFromInt(src_height)) / @as(f32, @floatFromInt(dst_height));
