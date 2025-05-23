@@ -38,7 +38,7 @@
     .dependencies = .{
         .sdl = .{
             .url = "https://github.com/castholm/SDL/archive/main/dbb1b96360658f5845ff6fac380c4f13d7276dc2.tar.gz",
-            .hash = "sdl-0.2.3+3.2.14-7uIn9BR5fgHLSuR3NxLrwhUENvEQwoNBeV2-johgGda_",
+            .hash = "sdl-0.2.3+3.2.14-7uIn9Gh6fgEdV7R2A723rZxtbgkVd0PHIs2rvshLBqgV",
         },
         .wayland = .{
             .url = "git+https://github.com/ifreund/zig-wayland/#f3c5d503e540ada8cbcb056420de240af0c094f7",
