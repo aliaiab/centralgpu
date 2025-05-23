@@ -134,7 +134,7 @@ fn glFlushCallback() void {
     // @memset(wayland_state.out_pixel_buffer, .{ .r = 255, .g = 0, .b = 0, .x = 255 });
 
     // while (true) {
-    if (wayland_state.display.roundtrip() != .SUCCESS) @panic("");
+    if (wayland_state.display.dispatch() != .SUCCESS) @panic("");
 
     wayland_state.surface.attach(wayland_state.buffer, 0, 0);
     wayland_state.surface.damage(0, 0, std.math.maxInt(i32), std.math.maxInt(i32));

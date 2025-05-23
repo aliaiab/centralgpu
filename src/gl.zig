@@ -59,6 +59,7 @@ pub const Context = struct {
     }) = .empty,
     ///Maps from GL_TEXTURE_0..80
     texture_units: [80]u32 = @splat(0),
+    texture_unit_enabled: [80]bool = @splat(false),
     texture_environments: [80]centralgpu.TextureEnvironment = [1]centralgpu.TextureEnvironment{.{}} ** 80,
     texture_unit_active: u32 = 0,
 
@@ -77,7 +78,6 @@ pub const Context = struct {
     draw_commands: std.ArrayListUnmanaged(DrawCommandState) = .empty,
 
     //Draw state
-    enable_texturing: bool = false,
     enable_alpha_test: bool = false,
     enable_scissor_test: bool = false,
     enable_depth_test: bool = false,
@@ -722,22 +722,26 @@ fn startCommand(context: *Context) void {
 
     command.texture_environments = [1]centralgpu.TextureEnvironment{.{}} ** 4;
 
-    for (0..4) |texture_unit| {
-        const texture_handle = context.texture_units[texture_unit];
-        const texture_env = context.texture_environments[texture_unit];
-        if (texture_handle != 0) {
-            const active_texture = &context.textures.items[texture_handle - 1];
+    for (0..4) |descriptor_index| {
+        command.image_descriptor[descriptor_index].rel_ptr = -1;
+    }
 
-            command.image_base[texture_unit] = @ptrCast(active_texture.texture_data.ptr);
-            command.image_descriptor[texture_unit] = active_texture.descriptor;
-            command.texture_environments[texture_unit] = texture_env;
-        } else {
-            //TODO: handle binding texture 0
-            command.image_descriptor[texture_unit].rel_ptr = -1;
-        }
+    {
+        var descriptor_index: usize = 0;
 
-        if (context.enable_texturing == false) {
-            command.image_descriptor[texture_unit].rel_ptr = -1;
+        for (0..4) |texture_unit| {
+            const texture_handle = context.texture_units[texture_unit];
+            const texture_unit_enabled = context.texture_unit_enabled[texture_unit];
+            const texture_env = context.texture_environments[texture_unit];
+
+            if (texture_handle != 0 and texture_unit_enabled) {
+                const active_texture = &context.textures.items[texture_handle - 1];
+
+                command.image_base[descriptor_index] = @ptrCast(active_texture.texture_data.ptr);
+                command.image_descriptor[descriptor_index] = active_texture.descriptor;
+                command.texture_environments[descriptor_index] = texture_env;
+                descriptor_index += 1;
+            }
         }
     }
 
@@ -901,7 +905,7 @@ pub export fn glEnable(cap: i32) callconv(.c) void {
 
     switch (cap) {
         GL_TEXTURE_2D => {
-            context.enable_texturing = true;
+            context.texture_unit_enabled[context.texture_unit_active] = true;
         },
         GL_ALPHA_TEST => {
             context.enable_alpha_test = true;
@@ -930,7 +934,7 @@ pub export fn glDisable(cap: i32) callconv(.c) void {
 
     switch (cap) {
         GL_TEXTURE_2D => {
-            context.enable_texturing = false;
+            context.texture_unit_enabled[context.texture_unit_active] = false;
         },
         GL_ALPHA_TEST => {
             context.enable_alpha_test = false;

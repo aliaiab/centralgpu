@@ -79,9 +79,14 @@ pub fn build(b: *std.Build) void {
         {
             const Scanner = @import("wayland").Scanner;
 
-            const scanner = Scanner.create(b, .{});
+            const scanner = Scanner.create(b, .{
+                .wayland_xml = b.path("src/gl/wayland.xml"),
+                .wayland_protocols = b.path("src/gl/wayland/"),
+            });
 
-            const wayland_module = b.createModule(.{ .root_source_file = scanner.result });
+            const wayland_module = b.createModule(.{
+                .root_source_file = scanner.result,
+            });
 
             scanner.addSystemProtocol("stable/xdg-shell/xdg-shell.xml");
             scanner.addSystemProtocol("unstable/xdg-decoration/xdg-decoration-unstable-v1.xml");
