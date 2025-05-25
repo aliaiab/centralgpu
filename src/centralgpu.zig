@@ -21,6 +21,12 @@ pub const XRgb888 = packed struct(u32) {
     x: u8 = 0,
 };
 
+pub const Depth24Stencil8 = packed struct(u32) {
+    depth: f16,
+    stencil: u8,
+    _: u8 = 0,
+};
+
 ///Computes the actual, padded size in either x or y of a render target
 pub fn computeTargetPaddedSize(value: usize) usize {
     return (@divTrunc(value, 64) + @intFromBool(@rem(value, 64) != 0)) * 64;
@@ -414,17 +420,20 @@ pub const RasterState = struct {
 
     flags: Flags,
     blend_state: BlendState,
+    stencil_mask: u8,
+    stencil_ref: u8,
 
     render_target: Image,
-    depth_image: [*]f32,
+    depth_image: [*]Depth24Stencil8,
 
     pub const Flags = packed struct(u32) {
         enable_alpha_test: bool,
         enable_depth_test: bool,
         enable_depth_write: bool,
+        enable_stencil_test: bool,
         enable_blend: bool,
         invert_depth_test: bool,
-        _: u27 = 0,
+        _: u26 = 0,
     };
 };
 
@@ -436,6 +445,7 @@ pub const TextureEnvironment = struct {
         modulate,
         replace,
         add,
+        decal,
     };
 };
 
@@ -792,6 +802,7 @@ pub fn rasterizeTriangle(
 
                 const recip_z = bary_0 * recip_z_0 + bary_1 * recip_z_1 + bary_2 * recip_z_2;
                 const pixel_z = reciprocal(recip_z);
+                _ = pixel_z; // autofix
                 const fragment_w = reciprocal(fragment_recip_w);
                 _ = fragment_w; // autofix
 
@@ -808,19 +819,42 @@ pub fn rasterizeTriangle(
                 bary_1 *= reciprocal_bary_sum;
                 bary_2 *= reciprocal_bary_sum;
 
-                if (raster_state.flags.enable_depth_test) {
-                    const previous_depth = maskedLoad(
-                        f32,
+                var previous_stencil: WarpRegister(u8) = @splat(0);
+                var new_stencil: WarpRegister(u8) = @splat(0);
+                var pass_stencil: WarpRegister(bool) = @splat(true);
+                var pass_depth: WarpRegister(bool) = @splat(true);
+
+                if (raster_state.flags.enable_depth_test or raster_state.flags.enable_stencil_test) {
+                    const previous_depth_packed = maskedLoad(
+                        u32,
                         execution_mask != @as(WarpRegister(u1), @splat(0)),
-                        target_depth,
+                        @ptrCast(target_depth),
                     );
 
-                    const depth_difference = pixel_z - previous_depth;
+                    const previous_depth_recip = unpackDepthStencilDepth(previous_depth_packed);
+
+                    previous_stencil = unpackDepthStencilStencil(previous_depth_packed);
+
+                    // new_stencil = previous_stencil & @as(WarpRegister(u8), @splat(raster_state.stencil_mask));
+                    new_stencil = previous_stencil;
+
+                    const depth_difference = recip_z - previous_depth_recip;
 
                     if (raster_state.flags.invert_depth_test) {
-                        execution_mask &= @intFromBool(depth_difference >= @as(WarpRegister(f32), @splat(0)));
+                        pass_depth = depth_difference <= @as(WarpRegister(f32), @splat(0));
                     } else {
-                        execution_mask &= @intFromBool(depth_difference <= @as(WarpRegister(f32), @splat(0)));
+                        pass_depth = depth_difference >= @as(WarpRegister(f32), @splat(0));
+                    }
+
+                    execution_mask &= @intFromBool(pass_depth);
+
+                    if (raster_state.flags.enable_stencil_test) {
+                        var stencil_comparator = @as(WarpRegister(u8), @splat(raster_state.stencil_ref));
+                        stencil_comparator &= @splat(raster_state.stencil_mask);
+
+                        pass_stencil = new_stencil == stencil_comparator;
+
+                        execution_mask &= @intFromBool(pass_stencil);
                     }
                 }
 
@@ -876,6 +910,15 @@ pub fn rasterizeTriangle(
                             },
                             .replace => {
                                 resultant_sample = texture_sample;
+                            },
+                            .decal => {
+                                const a_p = resultant_sample.w;
+
+                                resultant_sample = resultant_sample
+                                    .scale(@as(WarpRegister(f32), @splat(1)) - resultant_sample.w)
+                                    .add(texture_sample.scale(texture_sample.w));
+
+                                resultant_sample.w = a_p;
                             },
                             .add => {
                                 resultant_sample.x = resultant_sample.x + texture_sample.x;
@@ -947,11 +990,22 @@ pub fn rasterizeTriangle(
                 );
 
                 if (raster_state.flags.enable_depth_write) {
+                    var stencil = @select(u8, pass_stencil, previous_stencil, new_stencil);
+                    stencil = @select(
+                        u8,
+                        vectorBoolAnd(pass_stencil, pass_depth),
+                        //Increment the stencil
+                        previous_stencil +% @as(WarpRegister(u8), @splat(1)),
+                        stencil,
+                    );
+
+                    const depth_stencil = packDepthStencil(recip_z, stencil);
+
                     maskedStore(
-                        f32,
+                        u32,
                         execution_mask != @as(WarpRegister(u1), @splat(0)),
                         @ptrCast(@alignCast(target_depth)),
-                        pixel_z,
+                        depth_stencil,
                     );
                 }
             }
@@ -1036,6 +1090,50 @@ pub fn unpackUnorm4x(
         .z = z_float / max_value,
         .w = w_float / max_value,
     };
+}
+
+pub inline fn packDepthStencil(
+    depth: WarpRegister(f32),
+    stencil: WarpRegister(u8),
+) WarpRegister(u32) {
+    var result: WarpRegister(u32) = @splat(0);
+
+    result |= stencil;
+    result <<= @splat(8);
+
+    const depth_min: WarpRegister(f32) = @splat(0);
+    const depth_max: WarpRegister(f32) = @splat(1);
+
+    const depth_clamped = @max(@min(depth, depth_max), depth_min);
+
+    const depth_fixed = depth_clamped * @as(WarpRegister(f32), @splat(@floatFromInt(std.math.maxInt(u24) - 1)));
+
+    const depth_int: WarpRegister(u24) = @intFromFloat(depth_fixed);
+
+    result |= depth_int;
+
+    return result;
+}
+
+pub inline fn unpackDepthStencilDepth(
+    depth_stencil: WarpRegister(u32),
+) WarpRegister(f32) {
+    var pack = depth_stencil;
+
+    pack &= @splat(0x00_ff_ff_ff);
+
+    const pack_float: WarpRegister(f32) = @floatFromInt(pack);
+
+    return pack_float / @as(WarpRegister(f32), @splat(std.math.maxInt(u24) - 1));
+}
+
+pub inline fn unpackDepthStencilStencil(
+    depth_stencil: WarpRegister(u32),
+) WarpRegister(u8) {
+    var result: WarpRegister(u32) = depth_stencil;
+    result >>= @splat(24);
+
+    return @truncate(result);
 }
 
 pub inline fn maskedLoad(

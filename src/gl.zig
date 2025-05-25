@@ -3,7 +3,7 @@
 pub const Context = struct {
     gpa: std.mem.Allocator,
     bound_render_target: centralgpu.Image = undefined,
-    depth_image: []f32,
+    depth_image: []centralgpu.Depth24Stencil8 = &.{},
 
     viewport: struct { x: i32, y: i32, width: isize, height: isize } = undefined,
     scissor: struct { x: i32, y: i32, width: isize, height: isize } = undefined,
@@ -12,6 +12,7 @@ pub const Context = struct {
     clear_depth: f32 = 1,
     should_clear_color_attachment: bool = false,
     should_clear_depth_attachment: bool = false,
+    should_clear_stencil_attachment: bool = false,
 
     modelview_matrix_stack: [8][16]f32 = [_][16]f32{.{
         1, 0, 0, 0,
@@ -82,9 +83,13 @@ pub const Context = struct {
     enable_scissor_test: bool = false,
     enable_depth_test: bool = false,
     enable_depth_write: bool = false,
+    enable_stencil_test: bool = false,
     enable_face_cull: bool = false,
     enable_blend: bool = false,
     invert_depth_test: bool = false,
+
+    stencil_mask: u8 = 0xff,
+    stencil_ref: u8 = 1,
 
     blend_state: centralgpu.BlendState = .{
         .src_factor = .one,
@@ -119,6 +124,8 @@ const DrawCommandState = struct {
 
     flags: Flags,
     blend_state: centralgpu.BlendState,
+    stencil_mask: u8,
+    stencil_ref: u8,
 
     scissor_x: i32,
     scissor_y: i32,
@@ -137,10 +144,10 @@ const DrawCommandState = struct {
         enable_scissor_test: bool,
         enable_depth_test: bool,
         enable_depth_write: bool,
+        enable_stencil_test: bool,
         enable_blend: bool,
         enable_backface_cull: bool,
         invert_depth_test: bool,
-        _: u1,
     };
 };
 
@@ -157,16 +164,14 @@ pub export fn glClear(flags: u32) callconv(.c) void {
 
     if (flags & GL_COLOR_BUFFER_BIT != 0) {
         context.should_clear_color_attachment = true;
-
-        if (context.draw_commands.items.len != 0) {
-            // log.err("unflushed commands: {}", .{context.draw_commands.items.len});
-
-            // @panic("");
-        }
     }
 
     if (flags & GL_DEPTH_BUFFER_BIT != 0) {
         context.should_clear_depth_attachment = true;
+    }
+
+    if (flags & GL_STENCIL_BUFFER_BIT != 0) {
+        context.should_clear_stencil_attachment = true;
     }
 }
 
@@ -213,6 +218,46 @@ pub export fn glDepthMask(
     const context = current_context.?;
 
     context.enable_depth_write = flag;
+}
+
+pub export fn glStencilFunc(
+    func: i32,
+    ref: u32,
+    mask: u32,
+) void {
+    const context = current_context.?;
+
+    context.stencil_ref = @intCast(ref);
+    context.stencil_mask = @truncate(mask);
+
+    switch (func) {
+        GL_EQUAL => {},
+        else => {
+            std.debug.print("func: {}\n", .{func});
+            @panic("glStencilFunc");
+        },
+    }
+}
+
+pub export fn glStencilOp(
+    sfail: i32,
+    dpfail: i32,
+    dppass: i32,
+) void {
+    std.debug.print("sfail = 0x{x}, dpfail = 0x{x}, dppass = 0x{x}\n", .{ sfail, dpfail, dppass });
+
+    switch (sfail) {
+        GL_KEEP => {},
+        else => {
+            std.debug.print("op = 0x{x}\n", .{sfail});
+
+            @panic("glStencilOp");
+        },
+    }
+
+    if (dppass != GL_INCR) {
+        @panic("glStencilOp: only GL_INCR supported");
+    }
 }
 
 pub export fn glGetIntegerv(
@@ -529,6 +574,7 @@ pub export fn glTexEnvf(
                 GL_MODULATE => .modulate,
                 GL_REPLACE => .replace,
                 GL_ADD => .add,
+                GL_DECAL => .decal,
                 else => tex_env.function,
             };
         },
@@ -537,6 +583,7 @@ pub export fn glTexEnvf(
                 GL_MODULATE => .modulate,
                 GL_REPLACE => .replace,
                 GL_ADD => .add,
+                GL_DECAL => .decal,
                 else => {
                     std.debug.print("texture env func: 0x{x}\n", .{@as(i32, @intFromFloat(param))});
                     @panic("texture env function not supported");
@@ -749,8 +796,12 @@ fn startCommand(context: *Context) void {
     command.flags.enable_scissor_test = context.enable_scissor_test;
     command.flags.enable_depth_test = context.enable_depth_test;
     command.flags.enable_depth_write = context.enable_depth_write;
+    command.flags.enable_stencil_test = context.enable_stencil_test;
     command.flags.enable_backface_cull = context.enable_face_cull;
     command.flags.enable_blend = context.enable_blend;
+
+    command.stencil_mask = context.stencil_mask;
+    command.stencil_ref = context.stencil_ref;
 
     command.blend_state = context.blend_state;
 
@@ -923,7 +974,7 @@ pub export fn glEnable(cap: i32) callconv(.c) void {
             context.enable_blend = true;
         },
         GL_STENCIL_TEST => {
-            @panic("glEnable: Stencil test not supported");
+            context.enable_stencil_test = true;
         },
         else => {},
     }
@@ -950,6 +1001,9 @@ pub export fn glDisable(cap: i32) callconv(.c) void {
         },
         GL_BLEND => {
             context.enable_blend = false;
+        },
+        GL_STENCIL_TEST => {
+            context.enable_stencil_test = false;
         },
         else => {},
     }
@@ -1470,15 +1524,21 @@ pub export fn glFlush() callconv(.c) void {
     }
 
     if (context.should_clear_color_attachment) {
-        @memset(
-            context.bound_render_target.pixel_ptr[0 .. context.bound_render_target.width * context.bound_render_target.height],
-            @bitCast(context.clear_color),
-        );
+        const colour_image_words: []u32 = @ptrCast(@alignCast(context.bound_render_target.pixel_ptr[0 .. context.bound_render_target.width * context.bound_render_target.height]));
+
+        const colour_image: []@Vector(8, u32) = @ptrCast(@alignCast(colour_image_words));
+
+        @memset(colour_image, @splat(@bitCast(context.clear_color)));
     }
 
     if (context.should_clear_depth_attachment) {
-        @memset(context.depth_image, context.clear_depth);
-        @memset(context.depth_image, std.math.floatMax(f32));
+        // @memset(context.depth_image, context.clear_depth);
+
+        //TODO: handle not clearing the stencil values
+        const depth_clear = centralgpu.packDepthStencil(@splat(0), @splat(0xff));
+        const depth_image: []@Vector(8, u32) = @ptrCast(@alignCast(context.depth_image));
+
+        @memset(depth_image, depth_clear);
     }
 
     std.log.info("total draw_cmds: {}", .{context.draw_commands.items.len});
@@ -1582,13 +1642,16 @@ pub export fn glFlush() callconv(.c) void {
                     .scissor_max_y = actual_scissor_height,
                     .render_target = context.bound_render_target,
                     .depth_image = context.depth_image.ptr,
-                    .blend_state = context.blend_state,
+                    .blend_state = draw_command.blend_state,
+                    .stencil_mask = draw_command.stencil_mask,
+                    .stencil_ref = draw_command.stencil_ref,
                     .flags = .{
                         .enable_depth_test = draw_command.flags.enable_depth_test,
                         .enable_alpha_test = draw_command.flags.enable_alpha_test,
                         .enable_depth_write = draw_command.flags.enable_depth_write and draw_command.flags.enable_depth_test,
                         .enable_blend = draw_command.flags.enable_blend,
                         .invert_depth_test = draw_command.flags.invert_depth_test,
+                        .enable_stencil_test = draw_command.flags.enable_stencil_test,
                     },
                 },
                 unfiorms,
