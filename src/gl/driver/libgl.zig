@@ -25,7 +25,7 @@ export fn glGetString(name: i32) callconv(.c) [*:0]const u8 {
         centralgpu_gl.current_context.?.* = .{
             .gpa = gpa,
             .bound_render_target = .{ .pixel_ptr = target_buf.ptr, .width = target_width, .height = target_height },
-            .depth_image = gpa.alloc(f32, target_width * target_height) catch @panic("oom"),
+            .depth_image = gpa.alloc(centralgpu.Depth24Stencil8, target_width * target_height) catch @panic("oom"),
             .flush_callback = &glFlushCallback,
             .viewport = .{
                 .x = 0,
@@ -113,12 +113,23 @@ export fn glXCreateContextAttribsARB() void {
 }
 
 fn glFlushCallback() void {
-    std.log.info("wayland_state: {}, {}, {}", .{ wayland_state.display, wayland_state.surface, wayland_state.buffer });
-
     const surface_width: usize = @intCast(target_width);
     const surface_height: usize = @intCast(target_height);
 
     const pixel_ptr: [*]centralgpu.XRgb888 = @ptrCast(@alignCast(wayland_state.out_pixel_buffer.ptr));
+
+    {
+        var min_depth: f16 = std.math.floatMax(f16);
+        var max_depth: f16 = std.math.floatMin(f16);
+
+        for (centralgpu_gl.current_context.?.depth_image) |depth_stencil| {
+            min_depth = @min(min_depth, depth_stencil.depth);
+            max_depth = @max(max_depth, depth_stencil.depth);
+        }
+
+        std.debug.print("min_depth: {d}\n", .{min_depth});
+        std.debug.print("max_depth: {d}\n", .{max_depth});
+    }
 
     centralgpu.blitRasterTargetToLinear(
         centralgpu_gl.current_context.?.bound_render_target.pixel_ptr,
@@ -131,17 +142,11 @@ fn glFlushCallback() void {
         surface_height,
     );
 
-    // @memset(wayland_state.out_pixel_buffer, .{ .r = 255, .g = 0, .b = 0, .x = 255 });
-
-    // while (true) {
     if (wayland_state.display.dispatch() != .SUCCESS) @panic("");
 
     wayland_state.surface.attach(wayland_state.buffer, 0, 0);
     wayland_state.surface.damage(0, 0, std.math.maxInt(i32), std.math.maxInt(i32));
     wayland_state.surface.commit();
-    // }
-
-    // // std.posix.exit(0);
 }
 
 fn initWayland() !void {
