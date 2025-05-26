@@ -1616,8 +1616,6 @@ pub export fn glFlush() callconv(.c) void {
                     .scale_y = -viewport_height * 0.5,
                     .translation_z = (draw_command.depth_max + draw_command.depth_min) * 0.5,
                     .scale_z = (draw_command.depth_max - draw_command.depth_min) * 0.5,
-                    // .translation_z = 0,
-                    // .scale_z = 1,
                 },
                 .backface_cull = draw_command.flags.enable_backface_cull,
             };
