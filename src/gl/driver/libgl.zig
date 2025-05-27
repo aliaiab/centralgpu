@@ -118,24 +118,10 @@ fn glFlushCallback() void {
 
     const pixel_ptr: [*]centralgpu.XRgb888 = @ptrCast(@alignCast(wayland_state.out_pixel_buffer.ptr));
 
-    {
-        var min_depth: f16 = std.math.floatMax(f16);
-        var max_depth: f16 = std.math.floatMin(f16);
-
-        for (centralgpu_gl.current_context.?.depth_image) |depth_stencil| {
-            min_depth = @min(min_depth, depth_stencil.depth);
-            max_depth = @max(max_depth, depth_stencil.depth);
-        }
-
-        std.debug.print("min_depth: {d}\n", .{min_depth});
-        std.debug.print("max_depth: {d}\n", .{max_depth});
-    }
-
     centralgpu.blitRasterTargetToLinear(
         centralgpu_gl.current_context.?.bound_render_target.pixel_ptr,
         pixel_ptr,
         centralgpu_gl.current_context.?.bound_render_target.width,
-        // centralgpu_gl.current_context.?.bound_render_target.height,
         640,
         480,
         surface_width,
