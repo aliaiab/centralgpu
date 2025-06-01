@@ -11,8 +11,8 @@ const WaylandContext = struct {
     wm_base: ?*xdg.WmBase,
 };
 
-const target_width = 1024;
-const target_height = 768;
+const target_width = 1600;
+const target_height = 900;
 
 export fn glGetString(name: i32) callconv(.c) [*:0]const u8 {
     const gpa = std.heap.smp_allocator;
@@ -123,7 +123,9 @@ fn glFlushCallback() void {
         pixel_ptr,
         centralgpu_gl.current_context.?.bound_render_target.width,
         640,
+        // 1600,
         480,
+        // 900,
         surface_width,
         surface_height,
     );

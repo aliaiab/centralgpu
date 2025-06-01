@@ -1613,7 +1613,7 @@ pub export fn glFlush() callconv(.c) void {
                     .translation_x = viewport_x + viewport_width * 0.5,
                     .translation_y = viewport_y + viewport_height * 0.5,
                     .scale_x = viewport_width * 0.5,
-                    .scale_y = -viewport_height * 0.5,
+                    .scale_y = viewport_height * 0.5,
                     .translation_z = (draw_command.depth_max + draw_command.depth_min) * 0.5,
                     .scale_z = (draw_command.depth_max - draw_command.depth_min) * 0.5,
                 },
