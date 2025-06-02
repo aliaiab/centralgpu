@@ -11,8 +11,8 @@ const WaylandContext = struct {
     wm_base: ?*xdg.WmBase,
 };
 
-const target_width = 1600;
-const target_height = 900;
+const target_width = 720 * 2;
+const target_height = 480 * 2;
 
 export fn glGetString(name: i32) callconv(.c) [*:0]const u8 {
     const gpa = std.heap.smp_allocator;
@@ -96,22 +96,6 @@ var wayland_state: struct {
     running: bool = true,
 } = undefined;
 
-// export fn __glDispatchInit() void {
-// @panic("lol");
-// }
-
-export fn glXCreateWindow() void {
-    @panic("Lol");
-}
-
-export fn glXCreateNewContext() void {
-    @panic("Lol");
-}
-
-export fn glXCreateContextAttribsARB() void {
-    @panic("Lol");
-}
-
 fn glFlushCallback() void {
     const surface_width: usize = @intCast(target_width);
     const surface_height: usize = @intCast(target_height);
@@ -122,7 +106,7 @@ fn glFlushCallback() void {
         centralgpu_gl.current_context.?.bound_render_target.pixel_ptr,
         pixel_ptr,
         centralgpu_gl.current_context.?.bound_render_target.width,
-        640,
+        720,
         // 1600,
         480,
         // 900,
@@ -130,7 +114,7 @@ fn glFlushCallback() void {
         surface_height,
     );
 
-    if (wayland_state.display.dispatch() != .SUCCESS) @panic("");
+    if (wayland_state.display.roundtrip() != .SUCCESS) @panic("");
 
     wayland_state.surface.attach(wayland_state.buffer, 0, 0);
     wayland_state.surface.damage(0, 0, std.math.maxInt(i32), std.math.maxInt(i32));

@@ -208,7 +208,10 @@ pub export fn glDepthFunc(
         GL_GEQUAL => {
             context.invert_depth_test = true;
         },
-        else => {},
+        else => {
+            std.debug.print("glDepthFunc: func: 0x{x}\n", .{func});
+            @panic("GL_DEPTH_FUNC");
+        },
     }
 }
 
@@ -1608,7 +1611,7 @@ pub export fn glFlush() callconv(.c) void {
             const viewport_width: f32 = @floatFromInt(draw_command.viewport_width);
             const viewport_height: f32 = @floatFromInt(draw_command.viewport_height);
 
-            const geometry_state: centralgpu.GeometryProcessState = .{
+            var geometry_state: centralgpu.GeometryProcessState = .{
                 .viewport_transform = .{
                     .translation_x = viewport_x + viewport_width * 0.5,
                     .translation_y = viewport_y + viewport_height * 0.5,
@@ -1616,9 +1619,18 @@ pub export fn glFlush() callconv(.c) void {
                     .scale_y = viewport_height * 0.5,
                     .translation_z = (draw_command.depth_max + draw_command.depth_min) * 0.5,
                     .scale_z = (draw_command.depth_max - draw_command.depth_min) * 0.5,
+                    .inverse_scale_x = undefined,
+                    .inverse_scale_y = undefined,
+                    .inverse_translation_x = undefined,
+                    .inverse_translation_y = undefined,
                 },
                 .backface_cull = draw_command.flags.enable_backface_cull,
             };
+            geometry_state.viewport_transform.inverse_translation_x = -geometry_state.viewport_transform.translation_x;
+            geometry_state.viewport_transform.inverse_translation_y = -geometry_state.viewport_transform.translation_y;
+
+            geometry_state.viewport_transform.inverse_scale_x = 1 / geometry_state.viewport_transform.scale_x;
+            geometry_state.viewport_transform.inverse_scale_y = 1 / geometry_state.viewport_transform.scale_y;
 
             const projected_triangles = centralgpu.processGeometry(
                 geometry_state,
