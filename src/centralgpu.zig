@@ -217,36 +217,34 @@ pub fn WarpVec4(comptime T: type) type {
 }
 
 pub fn Mat4x4(comptime T: type) type {
+    _ = T; // autofix
     return struct {
-        rows: [4]WarpVec4(T) = .{
-            WarpVec4(T).init(.{ 1, 0, 0, 0 }),
-            WarpVec4(T).init(.{ 0, 1, 0, 0 }),
-            WarpVec4(T).init(.{ 0, 0, 1, 0 }),
-            WarpVec4(T).init(.{ 0, 0, 0, 1 }),
-        },
+        rows: [4][4]WarpRegister(f32),
 
-        pub inline fn init(values: [4][4]T) @This() {
-            return .{
-                .rows = .{
-                    WarpVec4(T).init(values[0]),
-                    WarpVec4(T).init(values[1]),
-                    WarpVec4(T).init(values[2]),
-                    WarpVec4(T).init(values[3]),
-                },
-            };
-        }
+        pub fn mulByVec4(left: @This(), vec: WarpVec4(f32)) WarpVec4(f32) {
+            const mat = left.rows;
 
-        pub inline fn mulByVec4(left: @This(), right: WarpVec4(T)) WarpVec4(T) {
-            const x_res = left.rows[0].scale(right.x);
-            const y_res = left.rows[1].scale(right.y);
-            const z_res = left.rows[2].scale(right.z);
-            const w_res = left.rows[3].scale(right.w);
+            var result: WarpVec4(f32) = undefined;
 
-            var result: WarpVec4(T) = x_res;
+            result.x = @mulAdd(WarpRegister(f32), mat[0][0], vec.x, @splat(0));
+            result.x = @mulAdd(WarpRegister(f32), mat[0][1], vec.y, result.x);
+            result.x = @mulAdd(WarpRegister(f32), mat[0][2], vec.z, result.x);
+            result.x = @mulAdd(WarpRegister(f32), mat[0][3], vec.w, result.x);
 
-            result = result.add(y_res);
-            result = result.add(z_res);
-            result = result.add(w_res);
+            result.y = @mulAdd(WarpRegister(f32), mat[1][0], vec.x, @splat(0));
+            result.y = @mulAdd(WarpRegister(f32), mat[1][1], vec.y, result.y);
+            result.y = @mulAdd(WarpRegister(f32), mat[1][2], vec.z, result.y);
+            result.y = @mulAdd(WarpRegister(f32), mat[1][3], vec.w, result.y);
+
+            result.z = @mulAdd(WarpRegister(f32), mat[2][0], vec.x, @splat(0));
+            result.z = @mulAdd(WarpRegister(f32), mat[2][1], vec.y, result.z);
+            result.z = @mulAdd(WarpRegister(f32), mat[2][2], vec.z, result.z);
+            result.z = @mulAdd(WarpRegister(f32), mat[2][3], vec.w, result.z);
+
+            result.w = @mulAdd(WarpRegister(f32), mat[3][0], vec.x, @splat(0));
+            result.w = @mulAdd(WarpRegister(f32), mat[3][1], vec.y, result.w);
+            result.w = @mulAdd(WarpRegister(f32), mat[3][2], vec.z, result.w);
+            result.w = @mulAdd(WarpRegister(f32), mat[3][3], vec.w, result.w);
 
             return result;
         }
@@ -260,9 +258,11 @@ pub const WarpProjectedTriangle = struct {
 };
 
 pub const Uniforms = struct {
-    vertex_positions: []const [3]WarpVec4(f32),
+    vertex_positions: []const [3]WarpVec3(f32),
     vertex_colours: []const [3]u32,
     vertex_texture_coords: []const [3][4][2]f32,
+
+    vertex_matrix: [4][4]f32,
 
     image_base: [4][*]const u8,
     image_descriptor: [4]ImageDescriptor,
@@ -303,13 +303,26 @@ pub fn processGeometry(
     var cull_mask_y: WarpRegister(bool) = @splat(true);
     var cull_mask_z: WarpRegister(bool) = @splat(true);
 
-    for (0..3) |vertex_index| {
-        out_triangle[vertex_index] = .{
+    const vertex_matrix: Mat4x4(f32) = .{
+        .rows = .{
+            .{ @splat(uniforms.vertex_matrix[0][0]), @splat(uniforms.vertex_matrix[1][0]), @splat(uniforms.vertex_matrix[2][0]), @splat(uniforms.vertex_matrix[3][0]) },
+            .{ @splat(uniforms.vertex_matrix[0][1]), @splat(uniforms.vertex_matrix[1][1]), @splat(uniforms.vertex_matrix[2][1]), @splat(uniforms.vertex_matrix[3][1]) },
+            .{ @splat(uniforms.vertex_matrix[0][2]), @splat(uniforms.vertex_matrix[1][2]), @splat(uniforms.vertex_matrix[2][2]), @splat(uniforms.vertex_matrix[3][2]) },
+            .{ @splat(uniforms.vertex_matrix[0][3]), @splat(uniforms.vertex_matrix[1][3]), @splat(uniforms.vertex_matrix[2][3]), @splat(uniforms.vertex_matrix[3][3]) },
+        },
+    };
+
+    inline for (0..3) |vertex_index| {
+        const input_vertex: WarpVec4(f32) = .{
             .x = in_triangle[vertex_index].x,
             .y = in_triangle[vertex_index].y,
             .z = in_triangle[vertex_index].z,
-            .w = in_triangle[vertex_index].w,
+            .w = @splat(1),
         };
+
+        const transformed_vertex = vertex_matrix.mulByVec4(input_vertex);
+
+        out_triangle[vertex_index] = transformed_vertex;
 
         //mostly for debugging
         const cull_scale: WarpRegister(f32) = @splat(1);
@@ -1054,23 +1067,7 @@ pub fn rasterizeTriangle(
     }
 }
 
-inline fn edgeFunctionSimdVec2(
-    a: WarpVec2(f32),
-    b: WarpVec2(f32),
-    c: WarpVec2(f32),
-) WarpRegister(f32) {
-    return (c.x - a.x) * (b.y - a.y) - (c.y - a.y) * (b.x - a.x);
-}
-
-inline fn edgeFunctionSimd(
-    a: WarpVec4(f32),
-    b: WarpVec4(f32),
-    c: WarpVec4(f32),
-) WarpRegister(f32) {
-    return (c.x - a.x) * (b.y - a.y) - (c.y - a.y) * (b.x - a.x);
-}
-
-pub fn packUnorm4x(
+pub inline fn packUnorm4x(
     values: WarpVec4(f32),
 ) WarpRegister(u32) {
     @setRuntimeSafety(false);
@@ -1103,7 +1100,7 @@ pub fn packUnorm4x(
     return result;
 }
 
-pub fn unpackUnorm4x(
+pub inline fn unpackUnorm4x(
     value: WarpRegister(u32),
 ) WarpVec4(f32) {
     @setRuntimeSafety(false);
