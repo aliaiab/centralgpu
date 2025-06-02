@@ -11,8 +11,8 @@ const WaylandContext = struct {
     wm_base: ?*xdg.WmBase,
 };
 
-const target_width = 720 * 2;
-const target_height = 480 * 2;
+const target_width = 1024;
+const target_height = 768;
 
 export fn glGetString(name: i32) callconv(.c) [*:0]const u8 {
     const gpa = std.heap.smp_allocator;
@@ -24,6 +24,8 @@ export fn glGetString(name: i32) callconv(.c) [*:0]const u8 {
 
         centralgpu_gl.current_context.?.* = .{
             .gpa = gpa,
+            .render_area_width = target_width,
+            .render_area_height = target_height,
             .bound_render_target = .{ .pixel_ptr = target_buf.ptr, .width = target_width, .height = target_height },
             .depth_image = gpa.alloc(centralgpu.Depth24Stencil8, target_width * target_height) catch @panic("oom"),
             .flush_callback = &glFlushCallback,

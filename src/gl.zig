@@ -2,6 +2,12 @@
 
 pub const Context = struct {
     gpa: std.mem.Allocator,
+
+    have_seen_viewport: bool = false,
+
+    render_area_width: i32,
+    render_area_height: i32,
+
     bound_render_target: centralgpu.Image = undefined,
     depth_image: []centralgpu.Depth24Stencil8 = &.{},
 
@@ -177,6 +183,13 @@ pub export fn glClear(flags: u32) callconv(.c) void {
 
 pub export fn glViewport(x: i32, y: i32, w: isize, h: isize) callconv(.c) void {
     const context = current_context.?;
+
+    if (!context.have_seen_viewport) {
+        context.render_area_width = @intCast(w);
+        context.render_area_height = @intCast(h);
+
+        context.have_seen_viewport = true;
+    }
 
     context.viewport = .{
         .x = x,
@@ -1558,10 +1571,10 @@ pub export fn glFlush() callconv(.c) void {
         const triangle_group_begin = draw_command.triangle_id_start / 8;
         const triangle_group_count = draw_command.triangle_count / 8 + @intFromBool(draw_command.triangle_count % 8 != 0);
 
-        const actual_scissor_x: i32 = if (draw_command.flags.enable_scissor_test) draw_command.scissor_x else context.viewport.x;
-        const actual_scissor_y: i32 = if (draw_command.flags.enable_scissor_test) draw_command.scissor_y else context.viewport.y;
-        const actual_scissor_width: i32 = if (draw_command.flags.enable_scissor_test) draw_command.scissor_width else @truncate(context.viewport.width);
-        const actual_scissor_height: i32 = if (draw_command.flags.enable_scissor_test) draw_command.scissor_height else @truncate(context.viewport.height);
+        const actual_scissor_x: i32 = if (draw_command.flags.enable_scissor_test) draw_command.scissor_x else 0;
+        const actual_scissor_y: i32 = if (draw_command.flags.enable_scissor_test) draw_command.scissor_y else 0;
+        const actual_scissor_width: i32 = if (draw_command.flags.enable_scissor_test) draw_command.scissor_width else @intCast(context.render_area_width);
+        const actual_scissor_height: i32 = if (draw_command.flags.enable_scissor_test) draw_command.scissor_height else @intCast(context.render_area_height);
 
         var triangle_id_start: u32 = @intCast(draw_command.triangle_id_start);
 
