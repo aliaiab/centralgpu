@@ -42,7 +42,7 @@ pub const Context = struct {
     } = .modelview,
 
     triangle_count: usize = 0,
-    triangle_positions: std.ArrayListUnmanaged([3]centralgpu.WarpVec4(f32)) = .empty,
+    triangle_positions: std.ArrayListUnmanaged([3]centralgpu.WarpVec3(f32)) = .empty,
     triangle_colors: std.ArrayListUnmanaged([3]u32) = .empty,
     triangle_tex_coords: std.ArrayListUnmanaged([3][4][2]f32) = .empty,
 
@@ -76,7 +76,7 @@ pub const Context = struct {
 
     //Vertex scratch
     vertex_scratch: std.MultiArrayList(struct {
-        position: [4]f32,
+        position: [3]f32,
         colour: u32,
         //Indexed by texture unit
         uv: [4][2]f32,
@@ -123,6 +123,8 @@ const DrawCommandState = struct {
 
     scratch_vertex_start: u32,
     scratch_vertex_end: u32,
+
+    vertex_matrix: [4][4]f32,
 
     image_base: [4][*]const u8,
     image_descriptor: [4]centralgpu.ImageDescriptor,
@@ -833,6 +835,15 @@ fn startCommand(context: *Context) void {
     command.viewport_y = @intCast(context.viewport.y);
     command.viewport_width = @intCast(context.viewport.width);
     command.viewport_height = @intCast(context.viewport.height);
+
+    const current_modelview_matrix = context.modelview_matrix_stack[context.modelview_matrix_stack_index];
+    const current_projection_matrix = context.projection_matrix_stack[context.projection_matrix_stack_index];
+
+    var matrix_product: [16]f32 = undefined;
+
+    matmul4(&matrix_product, &current_projection_matrix, &current_modelview_matrix);
+
+    command.vertex_matrix = @bitCast(matrix_product);
 }
 
 fn endCommand(context: *Context) void {
@@ -1323,18 +1334,8 @@ pub export fn glOrtho(
 pub export fn glVertex3f(x: f32, y: f32, z: f32) callconv(.c) void {
     const context = current_context.?;
 
-    const current_modelview_matrix = context.modelview_matrix_stack[context.modelview_matrix_stack_index];
-    const current_projection_matrix = context.projection_matrix_stack[context.projection_matrix_stack_index];
-
-    const transformed = matrix_math.mulByVec4(@bitCast(current_modelview_matrix), .{ x, y, z, 1 });
-
-    // matmul4(&matrix_product, &current_modelview_matrix, &current_projection_matrix);
-
-    //TODO: move computation to primitive shader
-    const projected_vertex = matrix_math.mulByVec4(@bitCast(current_projection_matrix), transformed);
-
     context.vertex_scratch.append(context.gpa, .{
-        .position = projected_vertex,
+        .position = .{ x, y, z },
         .colour = context.vertex_colour,
         .uv = context.vertex_uv,
     }) catch @panic("oom");
@@ -1370,7 +1371,6 @@ fn flushPrimitives(context: *Context) void {
                     triangle_group[tri_vertex_index].x[triangle_local_index] = context.vertex_scratch.items(.position)[scratch_index][0];
                     triangle_group[tri_vertex_index].y[triangle_local_index] = context.vertex_scratch.items(.position)[scratch_index][1];
                     triangle_group[tri_vertex_index].z[triangle_local_index] = context.vertex_scratch.items(.position)[scratch_index][2];
-                    triangle_group[tri_vertex_index].w[triangle_local_index] = context.vertex_scratch.items(.position)[scratch_index][3];
 
                     context.triangle_colors.items[triangle_id][tri_vertex_index] = context.vertex_scratch.items(.colour)[scratch_index];
                     context.triangle_tex_coords.items[triangle_id][tri_vertex_index] = context.vertex_scratch.items(.uv)[scratch_index];
@@ -1400,7 +1400,6 @@ fn flushPrimitives(context: *Context) void {
                     triangle_group[tri_vertex_index].x[triangle_local_index] = context.vertex_scratch.items(.position)[scratch_index][0];
                     triangle_group[tri_vertex_index].y[triangle_local_index] = context.vertex_scratch.items(.position)[scratch_index][1];
                     triangle_group[tri_vertex_index].z[triangle_local_index] = context.vertex_scratch.items(.position)[scratch_index][2];
-                    triangle_group[tri_vertex_index].w[triangle_local_index] = context.vertex_scratch.items(.position)[scratch_index][3];
 
                     context.triangle_colors.items[triangle_id][tri_vertex_index] = context.vertex_scratch.items(.colour)[scratch_index];
                     context.triangle_tex_coords.items[triangle_id][tri_vertex_index] = context.vertex_scratch.items(.uv)[scratch_index];
@@ -1426,7 +1425,6 @@ fn flushPrimitives(context: *Context) void {
                     triangle_group[tri_vertex_index].x[triangle_local_index] = context.vertex_scratch.items(.position)[scratch_index][0];
                     triangle_group[tri_vertex_index].y[triangle_local_index] = context.vertex_scratch.items(.position)[scratch_index][1];
                     triangle_group[tri_vertex_index].z[triangle_local_index] = context.vertex_scratch.items(.position)[scratch_index][2];
-                    triangle_group[tri_vertex_index].w[triangle_local_index] = context.vertex_scratch.items(.position)[scratch_index][3];
 
                     context.triangle_colors.items[triangle_id][tri_vertex_index] = context.vertex_scratch.items(.colour)[scratch_index];
                     context.triangle_tex_coords.items[triangle_id][tri_vertex_index] = context.vertex_scratch.items(.uv)[scratch_index];
@@ -1455,7 +1453,6 @@ fn flushPrimitives(context: *Context) void {
                     triangle_group[tri_vertex_index].x[triangle_local_index] = context.vertex_scratch.items(.position)[scratch_index][0];
                     triangle_group[tri_vertex_index].y[triangle_local_index] = context.vertex_scratch.items(.position)[scratch_index][1];
                     triangle_group[tri_vertex_index].z[triangle_local_index] = context.vertex_scratch.items(.position)[scratch_index][2];
-                    triangle_group[tri_vertex_index].w[triangle_local_index] = context.vertex_scratch.items(.position)[scratch_index][3];
 
                     context.triangle_colors.items[triangle_id][tri_vertex_index] = context.vertex_scratch.items(.colour)[scratch_index];
                     context.triangle_tex_coords.items[triangle_id][tri_vertex_index] = context.vertex_scratch.items(.uv)[scratch_index];
@@ -1557,8 +1554,8 @@ pub export fn glFlush() callconv(.c) void {
         @memset(depth_image, depth_clear);
     }
 
-    std.log.info("total draw_cmds: {}", .{context.draw_commands.items.len});
-    std.log.info("total triangle: {}", .{context.triangle_count});
+    std.debug.print("total draw_cmds: {}\n", .{context.draw_commands.items.len});
+    std.debug.print("total triangle: {}\n", .{context.triangle_count});
 
     var previous_mask: centralgpu.WarpRegister(bool) = @splat(false);
     var previous_group: usize = 0;
@@ -1582,6 +1579,7 @@ pub export fn glFlush() callconv(.c) void {
             defer triangle_id_start += 8 - @rem(triangle_id_start, 8);
 
             const unfiorms: centralgpu.Uniforms = .{
+                .vertex_matrix = draw_command.vertex_matrix,
                 .vertex_positions = context.triangle_positions.items,
                 .vertex_colours = context.triangle_colors.items,
                 .vertex_texture_coords = context.triangle_tex_coords.items,
