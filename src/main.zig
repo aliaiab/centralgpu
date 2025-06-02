@@ -51,6 +51,8 @@ pub fn main() !void {
 
     gl.current_context.?.* = .{
         .gpa = gpa,
+        .render_area_width = 720,
+        .render_area_height = 480,
         .bound_render_target = .{ .pixel_ptr = target_buffer.ptr, .width = render_target_width, .height = render_target_height },
         .depth_image = try gpa.alloc(centralgpu.Depth24Stencil8, render_target_width * render_target_height),
     };

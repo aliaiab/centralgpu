@@ -299,7 +299,9 @@ pub fn processGeometry(
     var out_triangle: [3]WarpVec4(f32) = undefined;
     var out_mask = input_mask;
 
-    var cull_mask: WarpRegister(bool) = @splat(true);
+    var cull_mask_x: WarpRegister(bool) = @splat(true);
+    var cull_mask_y: WarpRegister(bool) = @splat(true);
+    var cull_mask_z: WarpRegister(bool) = @splat(true);
 
     for (0..3) |vertex_index| {
         out_triangle[vertex_index] = .{
@@ -312,47 +314,33 @@ pub fn processGeometry(
         //mostly for debugging
         const cull_scale: WarpRegister(f32) = @splat(1);
 
-        cull_mask = vectorBoolAnd(
-            cull_mask,
+        cull_mask_x = vectorBoolAnd(
+            cull_mask_x,
             vectorBoolNot(vectorBoolAnd(
                 -out_triangle[vertex_index].w * cull_scale <= out_triangle[vertex_index].x,
                 out_triangle[vertex_index].x <= out_triangle[vertex_index].w * cull_scale,
             )),
         );
 
-        cull_mask = vectorBoolAnd(
-            cull_mask,
+        cull_mask_y = vectorBoolAnd(
+            cull_mask_y,
             vectorBoolNot(vectorBoolAnd(
                 -out_triangle[vertex_index].w * cull_scale <= out_triangle[vertex_index].y,
                 out_triangle[vertex_index].y <= out_triangle[vertex_index].w * cull_scale,
             )),
         );
 
-        if (homogenous_raster) {
-            // cull_mask = vectorBoolAnd(
-            //     cull_mask,
-            //     vectorBoolNot(vectorBoolAnd(
-            //         -out_triangle[vertex_index].w <= out_triangle[vertex_index].z,
-            //         out_triangle[vertex_index].z <= out_triangle[vertex_index].w,
-            //     )),
-            // );
-            // out_mask = vectorBoolAnd(
-            // out_mask,
-            // vectorBoolAnd(
-            // -out_triangle[vertex_index].w <= out_triangle[vertex_index].z,
-            // out_triangle[vertex_index].z <= out_triangle[vertex_index].w,
-            // ),
-            // );
-        } else {
-            out_mask = vectorBoolAnd(
-                out_mask,
-                vectorBoolAnd(
-                    -out_triangle[vertex_index].w <= out_triangle[vertex_index].z,
-                    out_triangle[vertex_index].z <= out_triangle[vertex_index].w,
-                ),
-            );
-        }
+        cull_mask_z = vectorBoolAnd(
+            cull_mask_z,
+            vectorBoolNot(vectorBoolAnd(
+                -out_triangle[vertex_index].w <= out_triangle[vertex_index].z,
+                out_triangle[vertex_index].z <= out_triangle[vertex_index].w,
+            )),
+        );
     }
+
+    const cull_mask = vectorBoolOr(cull_mask_x, vectorBoolOr(cull_mask_y, cull_mask_z));
+
     out_mask = vectorBoolAnd(out_mask, vectorBoolNot(cull_mask));
 
     if (@reduce(.Or, out_mask) == false) {
@@ -360,53 +348,12 @@ pub fn processGeometry(
     }
 
     for (0..3) |vertex_index| {
-        if (homogenous_raster == false) {
-            const reciprocal_w = @as(WarpRegister(f32), @splat(1)) / out_triangle[vertex_index].w;
-
-            out_triangle[vertex_index].x *= reciprocal_w;
-            out_triangle[vertex_index].y *= reciprocal_w;
-            out_triangle[vertex_index].z *= reciprocal_w;
-
-            out_triangle[vertex_index].w = reciprocal_w;
-        }
-    }
-
-    const eb_x = out_triangle[1].x - out_triangle[0].x;
-    const eb_y = out_triangle[1].y - out_triangle[0].y;
-    const ec_x = out_triangle[2].x - out_triangle[0].x;
-    const ec_y = out_triangle[2].y - out_triangle[0].y;
-
-    const backface_culled = eb_x * ec_y >= eb_y * ec_x;
-
-    for (0..3) |vertex_index| {
-        if (homogenous_raster == false) {
-            out_triangle[vertex_index].x = @mulAdd(
-                WarpRegister(f32),
-                out_triangle[vertex_index].x,
-                @splat(state.viewport_transform.scale_x),
-                @splat(state.viewport_transform.translation_x),
-            );
-
-            out_triangle[vertex_index].y = @mulAdd(
-                WarpRegister(f32),
-                out_triangle[vertex_index].y,
-                @splat(state.viewport_transform.scale_y),
-                @splat(state.viewport_transform.translation_y),
-            );
-
-            out_triangle[vertex_index].z = @mulAdd(
-                WarpRegister(f32),
-                out_triangle[vertex_index].z,
-                @splat(state.viewport_transform.scale_z),
-                @splat(state.viewport_transform.translation_z),
-            );
-        }
-    }
-
-    if (homogenous_raster == false) {
-        if (state.backface_cull) {
-            out_mask = vectorBoolAnd(out_mask, vectorBoolNot(backface_culled));
-        }
+        out_triangle[vertex_index].z = @mulAdd(
+            WarpRegister(f32),
+            out_triangle[vertex_index].z,
+            @splat(state.viewport_transform.scale_z),
+            @splat(state.viewport_transform.translation_z),
+        );
     }
 
     return .{
@@ -465,8 +412,6 @@ pub const TextureEnvironment = struct {
     };
 };
 
-const homogenous_raster = true;
-
 ///Rasterizer stage
 pub fn rasterize(
     geometry_state: GeometryProcessState,
@@ -482,17 +427,17 @@ pub fn rasterize(
     var bounds_max: WarpVec2(f32) = undefined;
 
     {
-        var p0: Homogenous2D = .{
+        const p0: Homogenous2D = .{
             .x = projected_triangle.points[0].x,
             .y = projected_triangle.points[0].y,
             .w = projected_triangle.points[0].w,
         };
-        var p1: Homogenous2D = .{
+        const p1: Homogenous2D = .{
             .x = projected_triangle.points[1].x,
             .y = projected_triangle.points[1].y,
             .w = projected_triangle.points[1].w,
         };
-        var p2: Homogenous2D = .{
+        const p2: Homogenous2D = .{
             .x = projected_triangle.points[2].x,
             .y = projected_triangle.points[2].y,
             .w = projected_triangle.points[2].w,
@@ -501,17 +446,16 @@ pub fn rasterize(
         const zero: WarpRegister(f32) = @splat(0);
         const inf: WarpRegister(f32) = @splat(std.math.inf(f32));
 
-        p0.x = @select(f32, p0.w <= zero, inf * std.math.sign(p0.x), p0.x);
-        p0.y = @select(f32, p0.w <= zero, inf * std.math.sign(p0.y), p0.y);
+        const p0_min: Homogenous2D = p0;
+        const p1_min: Homogenous2D = p1;
+        const p2_min: Homogenous2D = p2;
 
-        p1.x = @select(f32, p1.w <= zero, inf * std.math.sign(p1.x), p1.x);
-        p1.y = @select(f32, p1.w <= zero, inf * std.math.sign(p1.y), p1.y);
+        const p0_max: Homogenous2D = p0;
+        const p1_max: Homogenous2D = p1;
+        const p2_max: Homogenous2D = p2;
 
-        p2.x = @select(f32, p2.w <= zero, inf * std.math.sign(p2.x), p2.x);
-        p2.y = @select(f32, p2.w <= zero, inf * std.math.sign(p2.y), p2.y);
-
-        bounds_min = homogenousProject(homogenousMin(p0, homogenousMin(p1, p2)));
-        bounds_max = homogenousProject(homogenousMax(p0, homogenousMax(p1, p2)));
+        bounds_min = homogenousProject(homogenousMin(p0_min, homogenousMin(p1_min, p2_min)));
+        bounds_max = homogenousProject(homogenousMax(p0_max, homogenousMax(p1_max, p2_max)));
 
         const any_are_neg = vectorBoolOr(vectorBoolOr(p0.w <= zero, p1.w <= zero), p2.w <= zero);
 
@@ -534,51 +478,22 @@ pub fn rasterize(
         bounds_max.y = bounds_max.y * viewport_scale_y + viewport_translation_y;
     }
 
-    const triangle_area = edgeFunctionSimd(
-        projected_triangle.points[0],
-        projected_triangle.points[1],
-        projected_triangle.points[2],
-    );
-    const triangle_area_reciprocal = @as(WarpRegister(f32), @splat(1)) / triangle_area;
-
     var bounds_min_x: WarpRegister(f32) = @splat(0);
     var bounds_min_y: WarpRegister(f32) = @splat(0);
 
     var bounds_max_x: WarpRegister(f32) = @splat(@floatFromInt(raster_state.render_target.width));
     var bounds_max_y: WarpRegister(f32) = @splat(@floatFromInt(raster_state.render_target.height));
 
-    var triangle_min_x: WarpRegister(f32) = @splat(std.math.inf(f32));
-    var triangle_min_y: WarpRegister(f32) = @splat(std.math.inf(f32));
+    bounds_min_x = bounds_min.x;
+    bounds_min_y = bounds_min.y;
+    bounds_max_x = bounds_max.x;
+    bounds_max_y = bounds_max.y;
 
-    var triangle_max_x: WarpRegister(f32) = @splat(-std.math.inf(f32));
-    var triangle_max_y: WarpRegister(f32) = @splat(-std.math.inf(f32));
+    bounds_min_x = @max(bounds_min_x, @as(WarpRegister(f32), @floatFromInt(@as(WarpRegister(i32), @splat(raster_state.scissor_min_x)))));
+    bounds_min_y = @max(bounds_min_y, @as(WarpRegister(f32), @floatFromInt(@as(WarpRegister(i32), @splat(raster_state.scissor_min_y)))));
 
-    if (homogenous_raster) {
-        bounds_min_x = bounds_min.x;
-        bounds_min_y = bounds_min.y;
-        bounds_max_x = bounds_max.x;
-        bounds_max_y = bounds_max.y;
-
-        bounds_min_x = @max(bounds_min_x, @as(WarpRegister(f32), @floatFromInt(@as(WarpRegister(i32), @splat(raster_state.scissor_min_x)))));
-        bounds_min_y = @max(bounds_min_y, @as(WarpRegister(f32), @floatFromInt(@as(WarpRegister(i32), @splat(raster_state.scissor_min_y)))));
-
-        bounds_max_x = @min(bounds_max_x, @as(WarpRegister(f32), @floatFromInt(@as(WarpRegister(i32), @splat(raster_state.scissor_max_x)))));
-        bounds_max_y = @min(bounds_max_y, @as(WarpRegister(f32), @floatFromInt(@as(WarpRegister(i32), @splat(raster_state.scissor_max_y)))));
-    } else {
-        for (projected_triangle.points) |point| {
-            triangle_min_x = @min(point.x, triangle_min_x);
-            triangle_min_y = @min(point.y, triangle_min_y);
-
-            triangle_max_x = @max(point.x, triangle_max_x);
-            triangle_max_y = @max(point.y, triangle_max_y);
-        }
-
-        bounds_min_x = @max(bounds_min_x, triangle_min_x);
-        bounds_min_y = @max(bounds_min_y, triangle_min_y);
-
-        bounds_max_x = @min(bounds_max_x, triangle_max_x);
-        bounds_max_y = @min(bounds_max_y, triangle_max_y);
-    }
+    bounds_max_x = @min(bounds_max_x, @as(WarpRegister(f32), @floatFromInt(@as(WarpRegister(i32), @splat(raster_state.scissor_max_x)))));
+    bounds_max_y = @min(bounds_max_y, @as(WarpRegister(f32), @floatFromInt(@as(WarpRegister(i32), @splat(raster_state.scissor_max_y)))));
 
     var start_x: WarpRegister(i32) = @intFromFloat(@floor(bounds_min_x));
     var start_y: WarpRegister(i32) = @intFromFloat(@floor(bounds_min_y));
@@ -602,26 +517,23 @@ pub fn rasterize(
 
     const matrix_det = mat3x3Det(triangle_matrix);
     const matrix_det_recip = reciprocal(matrix_det);
-    var matrix_inv = mat3x3InvDet(triangle_matrix, matrix_det_recip);
+    const matrix_inv = mat3x3InvDet(triangle_matrix, matrix_det_recip);
 
-    matrix_inv[0][0] *= @splat(geometry_state.viewport_transform.inverse_scale_x);
-    matrix_inv[0][1] *= @splat(geometry_state.viewport_transform.inverse_scale_y);
-    matrix_inv[1][0] *= @splat(geometry_state.viewport_transform.inverse_scale_x);
-    matrix_inv[1][1] *= @splat(geometry_state.viewport_transform.inverse_scale_y);
-
-    matrix_inv[2][0] *= @splat(geometry_state.viewport_transform.inverse_scale_x);
-    matrix_inv[2][1] *= @splat(geometry_state.viewport_transform.inverse_scale_y);
-
-    const triangle_z_coords = mat3x3MulVec(triangle_matrix, .{
+    const triangle_z_coords = mat3x3MulVec(matrix_inv, .{
         .x = projected_triangle.points[0].z,
         .y = projected_triangle.points[1].z,
         .z = projected_triangle.points[2].z,
     });
 
-    if (homogenous_raster) {
-        //Backface cull
-        projected_triangle.mask = vectorBoolAnd(projected_triangle.mask, matrix_det <= @as(WarpRegister(f32), @splat(0)));
-    }
+    // matrix_inv[0][0] *= @splat(geometry_state.viewport_transform.inverse_scale_x);
+    // matrix_inv[0][1] *= @splat(geometry_state.viewport_transform.inverse_scale_y);
+    // matrix_inv[1][0] *= @splat(geometry_state.viewport_transform.inverse_scale_x);
+    // matrix_inv[1][1] *= @splat(geometry_state.viewport_transform.inverse_scale_y);
+    // matrix_inv[2][0] *= @splat(geometry_state.viewport_transform.inverse_scale_x);
+    // matrix_inv[2][1] *= @splat(geometry_state.viewport_transform.inverse_scale_y);
+
+    //Backface cull
+    projected_triangle.mask = vectorBoolAnd(projected_triangle.mask, matrix_det <= @as(WarpRegister(f32), @splat(0)));
 
     const mask_integer: u8 = @bitCast(projected_triangle.mask);
 
@@ -652,7 +564,6 @@ pub fn rasterize(
             raster_state,
             uniforms,
             projected_triangle,
-            per_triangle_matrix,
             per_triangle_matrix_inv,
             .{
                 @splat(triangle_z_coords.x[triangle_index]),
@@ -661,7 +572,6 @@ pub fn rasterize(
             },
             triangle_id_start + triangle_index,
             triangle_index,
-            triangle_area_reciprocal[triangle_index],
             start_x[triangle_index],
             start_y[triangle_index],
             end_x[triangle_index],
@@ -675,18 +585,16 @@ pub fn rasterizeTriangle(
     raster_state: RasterState,
     uniforms: Uniforms,
     projected_triangle: WarpProjectedTriangle,
-    triangle_matrix: Mat3x3,
     triangle_matrix_inv: Mat3x3,
     triangle_z_coords: [3]WarpRegister(f32),
     triangle_id: usize,
     triangle_index: usize,
-    triangle_area_reciprocal: f32,
     start_x: i32,
     start_y: i32,
     end_x: i32,
     end_y: i32,
 ) void {
-    _ = triangle_matrix; // autofix
+    _ = triangle_z_coords; // autofix
     @setRuntimeSafety(false);
     const block_width = 4;
     const block_height = block_width;
@@ -711,30 +619,9 @@ pub fn rasterizeTriangle(
     var recip_z_1: WarpRegister(f32) = undefined;
     var recip_z_2: WarpRegister(f32) = undefined;
 
-    if (homogenous_raster and false) {
-        recip_z_0 = reciprocal(triangle_z_coords[0]);
-        recip_z_1 = reciprocal(triangle_z_coords[1]);
-        recip_z_2 = reciprocal(triangle_z_coords[2]);
-    } else {
-        recip_z_0 = reciprocal(vert_z_over_w_0) * vertex_recip_w_0;
-        recip_z_1 = reciprocal(vert_z_over_w_1) * vertex_recip_w_1;
-        recip_z_2 = reciprocal(vert_z_over_w_2) * vertex_recip_w_2;
-    }
-
-    const unclipped_vert_0: WarpVec2(f32) = .{
-        .x = @splat(projected_triangle.points[0].x[triangle_index]),
-        .y = @splat(projected_triangle.points[0].y[triangle_index]),
-    };
-
-    const unclipped_vert_1: WarpVec2(f32) = .{
-        .x = @splat(projected_triangle.points[1].x[triangle_index]),
-        .y = @splat(projected_triangle.points[1].y[triangle_index]),
-    };
-
-    const unclipped_vert_2: WarpVec2(f32) = .{
-        .x = @splat(projected_triangle.points[2].x[triangle_index]),
-        .y = @splat(projected_triangle.points[2].y[triangle_index]),
-    };
+    recip_z_0 = reciprocal(vert_z_over_w_0) * vertex_recip_w_0;
+    recip_z_1 = reciprocal(vert_z_over_w_1) * vertex_recip_w_1;
+    recip_z_2 = reciprocal(vert_z_over_w_2) * vertex_recip_w_2;
 
     //per primitive processing
     const vertex_color_0_packed: WarpRegister(u32) = @splat(uniforms.vertex_colours[triangle_id][0]);
@@ -829,56 +716,30 @@ pub fn rasterizeTriangle(
                 var bary_1: WarpRegister(f32) = undefined;
                 var bary_2: WarpRegister(f32) = undefined;
 
-                if (homogenous_raster) {
-                    var clip_x: WarpRegister(f32) = point_x;
-                    var clip_y: WarpRegister(f32) = point_y;
+                var clip_x: WarpRegister(f32) = point_x;
+                var clip_y: WarpRegister(f32) = point_y;
 
-                    clip_x += @splat(geometry_state.viewport_transform.inverse_translation_x);
-                    clip_y += @splat(geometry_state.viewport_transform.inverse_translation_y);
+                clip_x += @splat(geometry_state.viewport_transform.inverse_translation_x);
+                clip_y += @splat(geometry_state.viewport_transform.inverse_translation_y);
+                clip_x *= @splat(geometry_state.viewport_transform.inverse_scale_x);
+                clip_y *= @splat(geometry_state.viewport_transform.inverse_scale_y);
 
-                    const barycentrics = mat3x3MulVec(triangle_matrix_inv, .{
-                        .x = clip_x,
-                        .y = clip_y,
-                        .z = @splat(1),
-                    });
+                const barycentrics = mat3x3MulVec(triangle_matrix_inv, .{
+                    .x = clip_x,
+                    .y = clip_y,
+                    .z = @splat(1),
+                });
 
-                    const bary_sum = barycentrics.x + barycentrics.y + barycentrics.z;
-                    const recip_bary_sum = reciprocal(bary_sum);
+                const bary_sum = barycentrics.x + barycentrics.y + barycentrics.z;
+                const recip_bary_sum = reciprocal(bary_sum);
 
-                    bary_0 = barycentrics.x * recip_bary_sum;
-                    bary_1 = barycentrics.y * recip_bary_sum;
-                    bary_2 = barycentrics.z * recip_bary_sum;
+                bary_0 = barycentrics.x * recip_bary_sum;
+                bary_1 = barycentrics.y * recip_bary_sum;
+                bary_2 = barycentrics.z * recip_bary_sum;
 
-                    bary_0 = barycentrics.x;
-                    bary_1 = barycentrics.y;
-                    bary_2 = barycentrics.z;
-                } else {
-                    bary_0 = edgeFunctionSimdVec2(unclipped_vert_1, unclipped_vert_2, .{ .x = point_x, .y = point_y });
-                    bary_1 = edgeFunctionSimdVec2(unclipped_vert_2, unclipped_vert_0, .{ .x = point_x, .y = point_y });
-                    bary_2 = edgeFunctionSimdVec2(unclipped_vert_0, unclipped_vert_1, .{ .x = point_x, .y = point_y });
-
-                    bary_0 *= @splat(triangle_area_reciprocal);
-                    bary_1 *= @splat(triangle_area_reciprocal);
-                    bary_2 *= @splat(triangle_area_reciprocal);
-                }
-
-                // if (vertex_recip_w_0[0] >= 0) {
-                //     execution_mask &= @intFromBool(bary_0 >= @as(WarpRegister(f32), @splat(0)));
-                // } else {
-                //     execution_mask &= @intFromBool(bary_0 <= @as(WarpRegister(f32), @splat(0)));
-                // }
-
-                // if (vertex_recip_w_1[0] >= 0) {
-                //     execution_mask &= @intFromBool(bary_1 >= @as(WarpRegister(f32), @splat(0)));
-                // } else {
-                //     execution_mask &= @intFromBool(bary_1 <= @as(WarpRegister(f32), @splat(0)));
-                // }
-
-                // if (vertex_recip_w_2[0] >= 0) {
-                // execution_mask &= @intFromBool(bary_2 >= @as(WarpRegister(f32), @splat(0)));
-                // } else {
-                // execution_mask &= @intFromBool(bary_2 <= @as(WarpRegister(f32), @splat(0)));
-                // }
+                bary_0 = barycentrics.x;
+                bary_1 = barycentrics.y;
+                bary_2 = barycentrics.z;
 
                 execution_mask &= @intFromBool(bary_0 >= @as(WarpRegister(f32), @splat(0)));
                 execution_mask &= @intFromBool(bary_1 >= @as(WarpRegister(f32), @splat(0)));
@@ -899,15 +760,6 @@ pub fn rasterizeTriangle(
                 bary_0 *= reciprocal_bary_sum;
                 bary_1 *= reciprocal_bary_sum;
                 bary_2 *= reciprocal_bary_sum;
-
-                if (homogenous_raster == false) {
-                    bary_0 *= recip_z_0;
-                    bary_1 *= recip_z_1;
-                    bary_2 *= recip_z_2;
-                    bary_0 *= recip_z;
-                    bary_1 *= recip_z;
-                    bary_2 *= recip_z;
-                }
 
                 var previous_stencil: WarpRegister(u8) = @splat(0);
                 var new_stencil: WarpRegister(u8) = @splat(0);
@@ -979,11 +831,6 @@ pub fn rasterizeTriangle(
                 color_a = @mulAdd(WarpRegister(f32), bary_0, vertex_color_0.w, color_a);
                 color_a = @mulAdd(WarpRegister(f32), bary_1, vertex_color_1.w, color_a);
                 color_a = @mulAdd(WarpRegister(f32), bary_2, vertex_color_2.w, color_a);
-
-                // const color_r = bary_0 * vertex_color_0.x + bary_1 * vertex_color_1.x + bary_2 * vertex_color_2.x;
-                // const color_g = bary_0 * vertex_color_0.y + bary_1 * vertex_color_1.y + bary_2 * vertex_color_2.y;
-                // const color_b = bary_0 * vertex_color_0.z + bary_1 * vertex_color_1.z + bary_2 * vertex_color_2.z;
-                // const color_a = bary_0 * vertex_color_0.w + bary_1 * vertex_color_1.w + bary_2 * vertex_color_2.w;
 
                 const color: WarpVec4(f32) = .{ .x = color_r, .y = color_g, .z = color_b, .w = color_a };
 
@@ -1276,13 +1123,13 @@ pub fn unpackUnorm4x(
     const z_float: WarpRegister(f32) = @floatFromInt(z);
     const w_float: WarpRegister(f32) = @floatFromInt(w);
 
-    const max_value: WarpRegister(f32) = @splat(std.math.maxInt(u8));
+    const max_value: WarpRegister(f32) = reciprocal(@splat(std.math.maxInt(u8)));
 
     return .{
-        .x = x_float / max_value,
-        .y = y_float / max_value,
-        .z = z_float / max_value,
-        .w = w_float / max_value,
+        .x = x_float * max_value,
+        .y = y_float * max_value,
+        .z = z_float * max_value,
+        .w = w_float * max_value,
     };
 }
 
