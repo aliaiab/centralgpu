@@ -46,6 +46,11 @@ pub const Context = struct {
     triangle_colors: std.ArrayListUnmanaged([3]u32) = .empty,
     triangle_tex_coords: std.ArrayListUnmanaged([3][4][2]f32) = .empty,
 
+    indexed_geometry: struct {
+        indices: std.ArrayListUnmanaged([3]centralgpu.WarpRegister(u32)) = .empty,
+        vertex_positions: std.ArrayListUnmanaged(f32) = .empty,
+    } = .{},
+
     default_texture_descriptor: centralgpu.ImageDescriptor = .{
         .width_log2 = 0,
         .height_log2 = 0,
@@ -66,6 +71,7 @@ pub const Context = struct {
     texture_units: [80]u32 = @splat(0),
     texture_unit_enabled: [80]bool = @splat(false),
     texture_environments: [80]centralgpu.TextureEnvironment = [1]centralgpu.TextureEnvironment{.{}} ** 80,
+    texture_rgb_scale: f32 = 1,
     texture_unit_active: u32 = 0,
 
     //Vertex Registers
@@ -131,6 +137,7 @@ const DrawCommandState = struct {
     image_base: [4][*]const u8,
     image_descriptor: [4]centralgpu.ImageDescriptor,
     texture_environments: [4]centralgpu.TextureEnvironment,
+    texture_rgb_scale: f32,
 
     flags: Flags,
     blend_state: centralgpu.BlendState,
@@ -223,7 +230,7 @@ pub export fn glDepthFunc(
             context.invert_depth_test = false;
         },
         GL_GEQUAL => {
-            context.invert_depth_test = true;
+            // context.invert_depth_test = true;
         },
         else => {
             std.debug.print("glDepthFunc: func: 0x{x}\n", .{func});
@@ -429,7 +436,6 @@ pub export fn glTexImage2D(
     }
 
     if (level != 0) {
-        // @panic("Accessing level");
         return;
     }
 
@@ -614,7 +620,7 @@ pub export fn glTexEnvf(
         GL_SOURCE1_RGB => {},
         GL_SOURCE2_RGB => {},
         GL_RGB_SCALE => {
-            tex_env.rgb_scale = param;
+            context.texture_rgb_scale = param;
         },
         else => {
             std.debug.print("0x{x}\n", .{pname});
@@ -757,10 +763,6 @@ pub export fn glEnd() callconv(.c) void {
 }
 
 fn startCommand(context: *Context) void {
-    if (!context.has_begun) {
-        // return;
-    }
-
     const command = context.draw_commands.addOne(context.gpa) catch @panic("oom");
 
     const triangle_id_offset: usize = 0;
@@ -787,6 +789,7 @@ fn startCommand(context: *Context) void {
     command.scratch_vertex_end = 0;
 
     command.texture_environments = [1]centralgpu.TextureEnvironment{.{}} ** 4;
+    command.texture_rgb_scale = context.texture_rgb_scale;
 
     for (0..4) |descriptor_index| {
         command.image_descriptor[descriptor_index].rel_ptr = -1;
@@ -848,10 +851,6 @@ fn startCommand(context: *Context) void {
 }
 
 fn endCommand(context: *Context) void {
-    if (!context.has_begun) {
-        // return;
-    }
-
     if (context.draw_commands.items.len == 0) {
         return;
     }
@@ -973,8 +972,6 @@ pub export fn glBlendFunc(
         GL_SRC_ALPHA => .src_alpha,
         else => @panic("BLEND FUNC VALUE NOT SUPPORTED"),
     };
-
-    // std.debug.print("source_factor: 0x{x}, dest_factor: 0x{x}\n", .{ source_factor, dest_factor });
 }
 
 pub export fn glHint() callconv(.c) void {}
@@ -1131,7 +1128,6 @@ pub export fn glRotatef(angle_degrees: f32, _x: f32, _y: f32, _z: f32) callconv(
     };
 
     glMultTransposeMatrixf(&rotation_matrix);
-    // glMultMatrixf(&rotation_matrix);
 }
 
 pub export fn glMatrixMode(mode: u32) callconv(.c) void {
@@ -1307,13 +1303,6 @@ pub export fn glOrtho(
     const t_y: f32 = -(top + bottom) / (top - bottom);
     const t_z: f32 = -(far_val + near_val) / (far_val - near_val);
 
-    // ortho_matrix = .{
-    //     2 / (right - left), 0,                  0,                         0,
-    //     0,                  2 / (top - bottom), 0,                         0,
-    //     0,                  0,                  -2 / (far_val - near_val), 0,
-    //     t_x,                t_y,                t_z,                       1,
-    // };
-
     const M = struct {
         pub inline fn _M(row: usize, col: usize) usize {
             return col * 4 + row;
@@ -1358,9 +1347,26 @@ fn flushPrimitives(context: *Context) void {
 
     const triangle_count = draw_command.triangle_count;
     const global_triangle_id_start = draw_command.triangle_id_start;
+
+    const vertex_start = context.indexed_geometry.vertex_positions.items.len / 3;
+    const vertex_count = draw_command.scratch_vertex_end - draw_command.scratch_vertex_start;
+    _ = vertex_count; // autofix
+
     const group_count = @divTrunc(triangle_count, 8) + @intFromBool(@rem(triangle_count, 8) != 0);
 
     const allocator = context.gpa;
+
+    _ = context.indexed_geometry.indices.addManyAsSlice(allocator, group_count) catch @panic("oom");
+    _ = context.indexed_geometry.vertex_positions.addManyAsSlice(allocator, context.vertex_scratch.len * 3) catch @panic("oom");
+
+    //Update vertex data
+    {
+        for (context.vertex_scratch.items(.position), 0..) |vertex_position, vertex_index| {
+            context.indexed_geometry.vertex_positions.items[(vertex_start + vertex_index) * 3 + 0] = vertex_position[0];
+            context.indexed_geometry.vertex_positions.items[(vertex_start + vertex_index) * 3 + 1] = vertex_position[1];
+            context.indexed_geometry.vertex_positions.items[(vertex_start + vertex_index) * 3 + 2] = vertex_position[2];
+        }
+    }
 
     _ = context.triangle_positions.addManyAsSlice(allocator, group_count) catch @panic("oom");
     _ = context.triangle_colors.addManyAsSlice(allocator, triangle_count) catch @panic("oom");
@@ -1373,14 +1379,12 @@ fn flushPrimitives(context: *Context) void {
                 const group_index = @divTrunc(triangle_id, 8);
                 const triangle_local_index = @rem(triangle_id, 8);
 
-                const triangle_group = &context.triangle_positions.items[group_index];
+                const triangle_group_indices = &context.indexed_geometry.indices.items[group_index];
 
-                for (0..3) |tri_vertex_index| {
+                inline for (0..3) |tri_vertex_index| {
                     const scratch_index = triangle_index * 3 + tri_vertex_index;
 
-                    triangle_group[tri_vertex_index].x[triangle_local_index] = context.vertex_scratch.items(.position)[scratch_index][0];
-                    triangle_group[tri_vertex_index].y[triangle_local_index] = context.vertex_scratch.items(.position)[scratch_index][1];
-                    triangle_group[tri_vertex_index].z[triangle_local_index] = context.vertex_scratch.items(.position)[scratch_index][2];
+                    triangle_group_indices[tri_vertex_index][triangle_local_index] = @intCast(vertex_start + scratch_index);
 
                     context.triangle_colors.items[triangle_id][tri_vertex_index] = context.vertex_scratch.items(.colour)[scratch_index];
                     context.triangle_tex_coords.items[triangle_id][tri_vertex_index] = context.vertex_scratch.items(.uv)[scratch_index];
@@ -1398,18 +1402,16 @@ fn flushPrimitives(context: *Context) void {
                 const group_index = @divTrunc(triangle_id, 8);
                 const triangle_local_index = @rem(triangle_id, 8);
 
-                const triangle_group = &context.triangle_positions.items[group_index];
+                const triangle_group_indices = &context.indexed_geometry.indices.items[group_index];
 
                 const input_quad_index = @divTrunc(triangle_index, 2);
 
-                for (0..3) |tri_vertex_index| {
+                inline for (0..3) |tri_vertex_index| {
                     const stream_vertex_index = triangle_index * 3 + tri_vertex_index;
 
                     const scratch_index = input_quad_index * 4 + quad_indices[@rem(stream_vertex_index, 6)];
 
-                    triangle_group[tri_vertex_index].x[triangle_local_index] = context.vertex_scratch.items(.position)[scratch_index][0];
-                    triangle_group[tri_vertex_index].y[triangle_local_index] = context.vertex_scratch.items(.position)[scratch_index][1];
-                    triangle_group[tri_vertex_index].z[triangle_local_index] = context.vertex_scratch.items(.position)[scratch_index][2];
+                    triangle_group_indices[tri_vertex_index][triangle_local_index] = @intCast(vertex_start + scratch_index);
 
                     context.triangle_colors.items[triangle_id][tri_vertex_index] = context.vertex_scratch.items(.colour)[scratch_index];
                     context.triangle_tex_coords.items[triangle_id][tri_vertex_index] = context.vertex_scratch.items(.uv)[scratch_index];
@@ -1422,19 +1424,17 @@ fn flushPrimitives(context: *Context) void {
                 const group_index = @divTrunc(triangle_id, 8);
                 const triangle_local_index = @rem(triangle_id, 8);
 
-                const triangle_group = &context.triangle_positions.items[group_index];
+                const triangle_group_indices = &context.indexed_geometry.indices.items[group_index];
 
                 const even_indices: [3]usize = .{ 0, 1, 2 };
                 const odd_indices: [3]usize = .{ 1, 0, 2 };
 
-                for (0..3) |tri_vertex_index| {
+                inline for (0..3) |tri_vertex_index| {
                     const is_even = triangle_index % 2 == 0;
 
                     const scratch_index = triangle_index + if (is_even) even_indices[tri_vertex_index] else odd_indices[tri_vertex_index];
 
-                    triangle_group[tri_vertex_index].x[triangle_local_index] = context.vertex_scratch.items(.position)[scratch_index][0];
-                    triangle_group[tri_vertex_index].y[triangle_local_index] = context.vertex_scratch.items(.position)[scratch_index][1];
-                    triangle_group[tri_vertex_index].z[triangle_local_index] = context.vertex_scratch.items(.position)[scratch_index][2];
+                    triangle_group_indices[tri_vertex_index][triangle_local_index] = @intCast(vertex_start + scratch_index);
 
                     context.triangle_colors.items[triangle_id][tri_vertex_index] = context.vertex_scratch.items(.colour)[scratch_index];
                     context.triangle_tex_coords.items[triangle_id][tri_vertex_index] = context.vertex_scratch.items(.uv)[scratch_index];
@@ -1447,7 +1447,7 @@ fn flushPrimitives(context: *Context) void {
                 const group_index = @divTrunc(triangle_id, 8);
                 const triangle_local_index = @rem(triangle_id, 8);
 
-                const triangle_group = &context.triangle_positions.items[group_index];
+                const triangle_group_indices = &context.indexed_geometry.indices.items[group_index];
 
                 inline for (0..3) |tri_vertex_index| {
                     const scratch_index = switch (tri_vertex_index) {
@@ -1457,9 +1457,7 @@ fn flushPrimitives(context: *Context) void {
                         else => unreachable,
                     };
 
-                    triangle_group[tri_vertex_index].x[triangle_local_index] = context.vertex_scratch.items(.position)[scratch_index][0];
-                    triangle_group[tri_vertex_index].y[triangle_local_index] = context.vertex_scratch.items(.position)[scratch_index][1];
-                    triangle_group[tri_vertex_index].z[triangle_local_index] = context.vertex_scratch.items(.position)[scratch_index][2];
+                    triangle_group_indices[tri_vertex_index][triangle_local_index] = @intCast(vertex_start + scratch_index);
 
                     context.triangle_colors.items[triangle_id][tri_vertex_index] = context.vertex_scratch.items(.colour)[scratch_index];
                     context.triangle_tex_coords.items[triangle_id][tri_vertex_index] = context.vertex_scratch.items(.uv)[scratch_index];
@@ -1550,16 +1548,18 @@ pub export fn glFlush() callconv(.c) void {
         const colour_image: []@Vector(8, u32) = @ptrCast(@alignCast(colour_image_words));
 
         @memset(colour_image, @splat(@bitCast(context.clear_color)));
+
+        context.should_clear_color_attachment = false;
     }
 
     if (context.should_clear_depth_attachment) {
-        // @memset(context.depth_image, context.clear_depth);
-
         //TODO: handle not clearing the stencil values
         const depth_clear = centralgpu.packDepthStencil(@splat(0), @splat(0xff));
         const depth_image: []@Vector(8, u32) = @ptrCast(@alignCast(context.depth_image));
 
         @memset(depth_image, depth_clear);
+
+        context.should_clear_depth_attachment = false;
     }
 
     std.debug.print("total draw_cmds: {}\n", .{context.draw_commands.items.len});
@@ -1576,6 +1576,7 @@ pub export fn glFlush() callconv(.c) void {
     var previous_group: usize = 0;
 
     for (context.draw_commands.items, 0..) |draw_command, draw_index| {
+        _ = draw_index; // autofix
         if (draw_command.triangle_count == 0) {
             continue;
         }
@@ -1601,6 +1602,13 @@ pub export fn glFlush() callconv(.c) void {
                 .image_base = draw_command.image_base,
                 .image_descriptor = draw_command.image_descriptor,
                 .texture_environments = draw_command.texture_environments,
+                .texture_rgb_scale = draw_command.texture_rgb_scale,
+                .indexed_geometry = .{
+                    .indices = context.indexed_geometry.indices.items,
+                    .vertex_positions = context.indexed_geometry.vertex_positions.items,
+                    .vertex_colours = &.{},
+                    .vertex_texture_coords = undefined,
+                },
             };
 
             var triangle_mask: centralgpu.WarpRegister(bool) = @splat(true);
@@ -1610,23 +1618,6 @@ pub export fn glFlush() callconv(.c) void {
             triangle_id += @as(centralgpu.WarpRegister(u32), @splat(@intCast(triangle_group_id * 8)));
 
             triangle_mask = centralgpu.vectorBoolAnd(triangle_mask, triangle_id < @as(centralgpu.WarpRegister(u32), @splat(draw_command.triangle_id_start + draw_command.triangle_count)));
-
-            if (triangle_group_id == previous_group) {
-                const mask_anded = centralgpu.vectorBoolAnd(previous_mask, triangle_mask);
-
-                triangle_mask = centralgpu.vectorBoolAnd(triangle_mask, centralgpu.vectorBoolNot(mask_anded));
-
-                std.log.info("draw_idx = {}", .{draw_index});
-                std.log.info("draw_command.triangle_id_start = {}", .{draw_command.triangle_id_start});
-                std.log.info("triangle_id_start = {}", .{triangle_id_start});
-                std.log.info("triangle_group_id = {}", .{triangle_group_id});
-                std.log.info("triangle_id = {}", .{triangle_id});
-                std.log.info("triangle_mask = {}", .{triangle_mask});
-
-                if (@reduce(.Or, centralgpu.vectorBoolAnd(previous_mask, triangle_mask)) == true) {
-                    @panic("Overlapping mask");
-                }
-            }
 
             defer previous_mask = triangle_mask;
             defer previous_group = triangle_group_id;
@@ -1697,13 +1688,14 @@ pub export fn glFlush() callconv(.c) void {
         }
     }
 
+    context.indexed_geometry.indices.clearRetainingCapacity();
+    context.indexed_geometry.vertex_positions.clearRetainingCapacity();
     context.triangle_positions.clearRetainingCapacity();
     context.triangle_colors.clearRetainingCapacity();
     context.triangle_tex_coords.clearRetainingCapacity();
     context.draw_commands.clearRetainingCapacity();
     context.vertex_scratch.clearRetainingCapacity();
     context.triangle_count = 0;
-    context.should_clear_color_attachment = false;
 }
 
 pub export fn glFinish() callconv(.c) void {

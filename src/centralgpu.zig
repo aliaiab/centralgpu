@@ -262,11 +262,20 @@ pub const Uniforms = struct {
     vertex_colours: []const [3]u32,
     vertex_texture_coords: []const [3][4][2]f32,
 
+    indexed_geometry: struct {
+        indices: []const [3]WarpRegister(u32),
+        vertex_positions: []const f32,
+
+        vertex_colours: []const u32,
+        vertex_texture_coords: [4][]const f32,
+    },
+
     vertex_matrix: [4][4]f32,
 
     image_base: [4][*]const u8,
     image_descriptor: [4]ImageDescriptor,
     texture_environments: [4]TextureEnvironment,
+    texture_rgb_scale: f32,
 };
 
 pub const GeometryProcessState = struct {
@@ -292,9 +301,11 @@ pub fn processGeometry(
     triangle_id_start: usize,
     input_mask: WarpRegister(bool),
 ) WarpHomogenousTriangle {
+    _ = state; // autofix
     @setRuntimeSafety(false);
 
     const in_triangle = uniforms.vertex_positions[triangle_id_start / 8];
+    _ = in_triangle; // autofix
 
     var out_triangle: [3]WarpVec4(f32) = undefined;
     var out_mask = input_mask;
@@ -312,13 +323,39 @@ pub fn processGeometry(
         },
     };
 
+    const index_data = uniforms.indexed_geometry.indices[@divTrunc(triangle_id_start, 8)];
+
     inline for (0..3) |vertex_index| {
-        const input_vertex: WarpVec4(f32) = .{
-            .x = in_triangle[vertex_index].x,
-            .y = in_triangle[vertex_index].y,
-            .z = in_triangle[vertex_index].z,
-            .w = @splat(1),
-        };
+        var input_vertex: WarpVec4(f32) = undefined;
+
+        //Vertex Fetch
+        {
+            const vertex_index_data = index_data[vertex_index];
+            const vertex_index_scaled = vertex_index_data * @as(WarpRegister(u32), @splat(3));
+
+            input_vertex.x = maskedGather(
+                f32,
+                input_mask,
+                uniforms.indexed_geometry.vertex_positions.ptr,
+                vertex_index_scaled,
+            );
+
+            input_vertex.y = maskedGather(
+                f32,
+                input_mask,
+                uniforms.indexed_geometry.vertex_positions.ptr,
+                vertex_index_scaled + @as(WarpRegister(u32), @splat(1)),
+            );
+
+            input_vertex.z = maskedGather(
+                f32,
+                input_mask,
+                uniforms.indexed_geometry.vertex_positions.ptr,
+                vertex_index_scaled + @as(WarpRegister(u32), @splat(2)),
+            );
+
+            input_vertex.w = @splat(1);
+        }
 
         const transformed_vertex = vertex_matrix.mulByVec4(input_vertex);
 
@@ -355,19 +392,6 @@ pub fn processGeometry(
     const cull_mask = vectorBoolOr(cull_mask_x, vectorBoolOr(cull_mask_y, cull_mask_z));
 
     out_mask = vectorBoolAnd(out_mask, vectorBoolNot(cull_mask));
-
-    if (@reduce(.Or, out_mask) == false) {
-        return .{ .mask = @splat(false), .points = undefined };
-    }
-
-    for (0..3) |vertex_index| {
-        out_triangle[vertex_index].z = @mulAdd(
-            WarpRegister(f32),
-            out_triangle[vertex_index].z,
-            @splat(state.viewport_transform.scale_z),
-            @splat(state.viewport_transform.translation_z),
-        );
-    }
 
     return .{
         .mask = out_mask,
@@ -748,7 +772,20 @@ pub fn rasterizeTriangle(
                 bary_1 *= reciprocal_bary_sum;
                 bary_2 *= reciprocal_bary_sum;
 
-                const recip_z = reciprocal(bary_0 * vert_z_0 + bary_1 * vert_z_1 + bary_2 * vert_z_2);
+                var fragment_z: WarpRegister(f32) = @splat(0);
+
+                fragment_z = @mulAdd(WarpRegister(f32), bary_0, vert_z_0, fragment_z);
+                fragment_z = @mulAdd(WarpRegister(f32), bary_1, vert_z_1, fragment_z);
+                fragment_z = @mulAdd(WarpRegister(f32), bary_2, vert_z_2, fragment_z);
+
+                fragment_z = @mulAdd(
+                    WarpRegister(f32),
+                    fragment_z,
+                    @splat(geometry_state.viewport_transform.scale_z),
+                    @splat(geometry_state.viewport_transform.translation_z),
+                );
+
+                const recip_z = reciprocal(fragment_z);
                 const recip_z_fixed = depthFloatToFixed(recip_z);
 
                 var previous_stencil: WarpRegister(u8) = @splat(0);
@@ -769,8 +806,7 @@ pub fn rasterizeTriangle(
 
                     previous_stencil = unpackDepthStencilStencil(previous_depth_packed);
 
-                    // new_stencil = previous_stencil & @as(WarpRegister(u8), @splat(raster_state.stencil_mask));
-                    new_stencil = previous_stencil;
+                    new_stencil = previous_stencil & @as(WarpRegister(u8), @splat(raster_state.stencil_mask));
 
                     const depth_difference = recip_z_fixed - previous_depth_recip;
 
@@ -826,8 +862,6 @@ pub fn rasterizeTriangle(
 
                 var color_result: WarpVec4(f32) = color;
 
-                color_result = color_result;
-
                 var resultant_sample: WarpVec4(f32) = .init(.{ 1, 1, 1, 1 });
 
                 for (uniforms.image_descriptor, uniforms.image_base, 0..) |image_descriptor, image_base, texture_unit| {
@@ -860,9 +894,9 @@ pub fn rasterizeTriangle(
                             .{ .x = tex_u, .y = tex_v },
                         );
 
-                        texture_sample.x *= @splat(uniforms.texture_environments[texture_unit].rgb_scale);
-                        texture_sample.y *= @splat(uniforms.texture_environments[texture_unit].rgb_scale);
-                        texture_sample.z *= @splat(uniforms.texture_environments[texture_unit].rgb_scale);
+                        // texture_sample.x *= @splat(uniforms.texture_environments[texture_unit].rgb_scale);
+                        // texture_sample.y *= @splat(uniforms.texture_environments[texture_unit].rgb_scale);
+                        // texture_sample.z *= @splat(uniforms.texture_environments[texture_unit].rgb_scale);
 
                         switch (texture_environment.function) {
                             .modulate => {
@@ -892,6 +926,10 @@ pub fn rasterizeTriangle(
                         }
                     }
                 }
+
+                resultant_sample.x *= @splat(uniforms.texture_rgb_scale);
+                resultant_sample.y *= @splat(uniforms.texture_rgb_scale);
+                resultant_sample.z *= @splat(uniforms.texture_rgb_scale);
 
                 const disable_texturing = false;
 
@@ -1049,7 +1087,7 @@ pub inline fn packUnorm4x(
 ) WarpRegister(u32) {
     @setRuntimeSafety(false);
 
-    const max_value: WarpRegister(f32) = @splat(std.math.maxInt(u8));
+    const max_value: WarpRegister(f32) = @splat(std.math.maxInt(u8) - 1);
 
     const x_in: WarpRegister(i32) = @intFromFloat(values.x * max_value);
     const y_in: WarpRegister(i32) = @intFromFloat(values.y * max_value);
@@ -1057,12 +1095,12 @@ pub inline fn packUnorm4x(
     const w_in: WarpRegister(i32) = @intFromFloat(values.w * max_value);
 
     const zero: WarpRegister(i32) = @splat(0);
-    const max_value_i32: WarpRegister(i32) = @splat(std.math.maxInt(u8));
+    const max_value_i32: WarpRegister(i32) = @splat(std.math.maxInt(u8) - 1);
 
-    const x: WarpRegister(u32) = @abs(std.math.clamp(x_in, zero, max_value_i32));
-    const y: WarpRegister(u32) = @abs(std.math.clamp(y_in, zero, max_value_i32));
-    const z: WarpRegister(u32) = @abs(std.math.clamp(z_in, zero, max_value_i32));
-    const w: WarpRegister(u32) = @abs(std.math.clamp(w_in, zero, max_value_i32));
+    const x: WarpRegister(u32) = @min(@max(x_in, zero), max_value_i32);
+    const y: WarpRegister(u32) = @min(@max(y_in, zero), max_value_i32);
+    const z: WarpRegister(u32) = @min(@max(z_in, zero), max_value_i32);
+    const w: WarpRegister(u32) = @min(@max(w_in, zero), max_value_i32);
 
     var result: WarpRegister(u32) = @splat(0);
 
@@ -1097,7 +1135,7 @@ pub inline fn unpackUnorm4x(
     const z_float: WarpRegister(f32) = @floatFromInt(z);
     const w_float: WarpRegister(f32) = @floatFromInt(w);
 
-    const max_value: WarpRegister(f32) = reciprocal(@splat(std.math.maxInt(u8)));
+    const max_value: WarpRegister(f32) = reciprocal(@splat(std.math.maxInt(u8) - 1));
 
     return .{
         .x = x_float * max_value,
@@ -1748,7 +1786,6 @@ pub fn blitRasterTargetToLinear(
             const src_block_x = @divTrunc(src_x, block_width);
 
             const block_index = src_block_x + src_block_y * block_count_x;
-            // const block_index = mortonEncodeScalar(@intCast(src_block_x), @intCast(src_block_y));
 
             const block_pixels = src_pixels + block_index * block_width * block_height;
 
@@ -1756,7 +1793,7 @@ pub fn blitRasterTargetToLinear(
             const block_offset_y: usize = src_y & 0b11;
 
             const src_pixel: Rgba32 = block_pixels[block_offset_x + block_offset_y * 4];
-            const actual_y: usize = dst_height - dst_y;
+            const actual_y: usize = dst_height - 1 - dst_y;
 
             dst_pixels[dst_x + actual_y * dst_width] = .{
                 .r = src_pixel.r,
