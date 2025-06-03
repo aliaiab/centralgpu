@@ -251,7 +251,7 @@ pub fn Mat4x4(comptime T: type) type {
     };
 }
 
-pub const WarpProjectedTriangle = struct {
+pub const WarpHomogenousTriangle = struct {
     mask: WarpRegister(bool),
     ///After projection w actual stores reciprocal w
     points: [3]WarpVec4(f32),
@@ -291,7 +291,7 @@ pub fn processGeometry(
     uniforms: Uniforms,
     triangle_id_start: usize,
     input_mask: WarpRegister(bool),
-) WarpProjectedTriangle {
+) WarpHomogenousTriangle {
     @setRuntimeSafety(false);
 
     const in_triangle = uniforms.vertex_positions[triangle_id_start / 8];
@@ -431,7 +431,7 @@ pub fn rasterize(
     raster_state: RasterState,
     uniforms: Uniforms,
     triangle_id_start: usize,
-    in_projected_triangle: WarpProjectedTriangle,
+    in_projected_triangle: WarpHomogenousTriangle,
 ) void {
     @setRuntimeSafety(false);
     var projected_triangle = in_projected_triangle;
@@ -474,7 +474,6 @@ pub fn rasterize(
 
         bounds_min.x = @select(f32, any_are_neg, -inf, bounds_min.x);
         bounds_min.y = @select(f32, any_are_neg, -inf, bounds_min.y);
-
         bounds_max.x = @select(f32, any_are_neg, inf, bounds_max.x);
         bounds_max.y = @select(f32, any_are_neg, inf, bounds_max.y);
 
@@ -538,13 +537,6 @@ pub fn rasterize(
         .z = projected_triangle.points[2].z,
     });
 
-    // matrix_inv[0][0] *= @splat(geometry_state.viewport_transform.inverse_scale_x);
-    // matrix_inv[0][1] *= @splat(geometry_state.viewport_transform.inverse_scale_y);
-    // matrix_inv[1][0] *= @splat(geometry_state.viewport_transform.inverse_scale_x);
-    // matrix_inv[1][1] *= @splat(geometry_state.viewport_transform.inverse_scale_y);
-    // matrix_inv[2][0] *= @splat(geometry_state.viewport_transform.inverse_scale_x);
-    // matrix_inv[2][1] *= @splat(geometry_state.viewport_transform.inverse_scale_y);
-
     //Backface cull
     projected_triangle.mask = vectorBoolAnd(projected_triangle.mask, matrix_det <= @as(WarpRegister(f32), @splat(0)));
 
@@ -597,7 +589,7 @@ pub fn rasterizeTriangle(
     geometry_state: GeometryProcessState,
     raster_state: RasterState,
     uniforms: Uniforms,
-    projected_triangle: WarpProjectedTriangle,
+    projected_triangle: WarpHomogenousTriangle,
     triangle_matrix_inv: Mat3x3,
     triangle_z_coords: [3]WarpRegister(f32),
     triangle_id: usize,
@@ -619,22 +611,14 @@ pub fn rasterizeTriangle(
     const block_end_x = @divTrunc(end_x, block_width) + (@intFromBool(@rem(end_x, block_width) != 0));
     const block_end_y = @divTrunc(end_y, block_height) + (@intFromBool(@rem(end_y, block_height) != 0));
 
-    const vert_z_over_w_0: WarpRegister(f32) = @splat(projected_triangle.points[0].z[triangle_index]);
-    const vert_z_over_w_1: WarpRegister(f32) = @splat(projected_triangle.points[1].z[triangle_index]);
-    const vert_z_over_w_2: WarpRegister(f32) = @splat(projected_triangle.points[2].z[triangle_index]);
+    const vert_z_0: WarpRegister(f32) = @splat(projected_triangle.points[0].z[triangle_index]);
+    const vert_z_1: WarpRegister(f32) = @splat(projected_triangle.points[1].z[triangle_index]);
+    const vert_z_2: WarpRegister(f32) = @splat(projected_triangle.points[2].z[triangle_index]);
 
     //We store reciprocal w in the w of the projected triangle after processing
-    const vertex_recip_w_0: WarpRegister(f32) = @splat(projected_triangle.points[0].w[triangle_index]);
-    const vertex_recip_w_1: WarpRegister(f32) = @splat(projected_triangle.points[1].w[triangle_index]);
-    const vertex_recip_w_2: WarpRegister(f32) = @splat(projected_triangle.points[2].w[triangle_index]);
-
-    var recip_z_0: WarpRegister(f32) = undefined;
-    var recip_z_1: WarpRegister(f32) = undefined;
-    var recip_z_2: WarpRegister(f32) = undefined;
-
-    recip_z_0 = reciprocal(vert_z_over_w_0) * vertex_recip_w_0;
-    recip_z_1 = reciprocal(vert_z_over_w_1) * vertex_recip_w_1;
-    recip_z_2 = reciprocal(vert_z_over_w_2) * vertex_recip_w_2;
+    const vertex_w_0: WarpRegister(f32) = reciprocal(@splat(projected_triangle.points[0].w[triangle_index]));
+    const vertex_w_1: WarpRegister(f32) = reciprocal(@splat(projected_triangle.points[1].w[triangle_index]));
+    const vertex_w_2: WarpRegister(f32) = reciprocal(@splat(projected_triangle.points[2].w[triangle_index]));
 
     //per primitive processing
     const vertex_color_0_packed: WarpRegister(u32) = @splat(uniforms.vertex_colours[triangle_id][0]);
@@ -743,13 +727,6 @@ pub fn rasterizeTriangle(
                     .z = @splat(1),
                 });
 
-                const bary_sum = barycentrics.x + barycentrics.y + barycentrics.z;
-                const recip_bary_sum = reciprocal(bary_sum);
-
-                bary_0 = barycentrics.x * recip_bary_sum;
-                bary_1 = barycentrics.y * recip_bary_sum;
-                bary_2 = barycentrics.z * recip_bary_sum;
-
                 bary_0 = barycentrics.x;
                 bary_1 = barycentrics.y;
                 bary_2 = barycentrics.z;
@@ -765,14 +742,14 @@ pub fn rasterizeTriangle(
                     continue;
                 }
 
-                const recip_z = bary_0 * recip_z_0 + bary_1 * recip_z_1 + bary_2 * recip_z_2;
-                const recip_z_fixed = depthFloatToFixed(recip_z);
-
                 const reciprocal_bary_sum = reciprocal(bary_0 + bary_1 + bary_2);
 
                 bary_0 *= reciprocal_bary_sum;
                 bary_1 *= reciprocal_bary_sum;
                 bary_2 *= reciprocal_bary_sum;
+
+                const recip_z = reciprocal(bary_0 * vert_z_0 + bary_1 * vert_z_1 + bary_2 * vert_z_2);
+                const recip_z_fixed = depthFloatToFixed(recip_z);
 
                 var previous_stencil: WarpRegister(u8) = @splat(0);
                 var new_stencil: WarpRegister(u8) = @splat(0);
@@ -1018,7 +995,7 @@ pub fn rasterizeTriangle(
                     is_on_bounds = vectorBoolAnd(is_on_bounds, point_y_int >= @as(WarpRegister(i32), @splat(start_y)));
                     is_on_bounds = vectorBoolAnd(is_on_bounds, point_y_int <= @as(WarpRegister(i32), @splat(end_y - 1)));
 
-                    is_on_bounds = vectorBoolAnd(is_on_bounds, @splat(vertex_recip_w_0[0] < 0 or vertex_recip_w_1[0] < 0 or vertex_recip_w_2[0] < 0));
+                    is_on_bounds = vectorBoolAnd(is_on_bounds, @splat(vertex_w_0[0] < 0 or vertex_w_1[0] < 0 or vertex_w_2[0] < 0));
 
                     const one: WarpRegister(f32) = @splat(1);
                     const zero: WarpRegister(f32) = @splat(0);
@@ -1364,14 +1341,42 @@ pub inline fn imageSampleDerivative(
     const rho_factor = @max(length_x, length_y);
     const mip_level = @log2(rho_factor);
 
-    if (mip_level[0] - 3 >= 0) {
+    const visualize_mip_level = false;
+
+    const mip_colours: [6]u32 = .{
+        packUnorm4x(.init(.{ 1, 1, 1, 1 }))[0],
+        packUnorm4x(.init(.{ 1, 0, 0, 1 }))[0],
+        packUnorm4x(.init(.{ 0, 1, 0, 1 }))[0],
+        packUnorm4x(.init(.{ 0, 0, 1, 1 }))[0],
+        packUnorm4x(.init(.{ 0, 1, 1, 1 }))[0],
+        packUnorm4x(.init(.{ 1, 0, 1, 1 }))[0],
+    };
+
+    if (visualize_mip_level) {
+        var mip_level_index: WarpRegister(u32) = @intFromFloat(mip_level);
+
+        mip_level_index = std.math.clamp(mip_level_index, @as(WarpRegister(u32), @splat(0)), @as(WarpRegister(u32), @splat(mip_colours.len - 1)));
+
+        const colour_packed = maskedGather(u32, execution_mask, &mip_colours, mip_level_index);
+        const colour = unpackUnorm4x(colour_packed);
         // return .{
         // .x = mip_level / @as(WarpRegister(f32), @splat(10.0)),
         // .y = @splat(0),
         // .z = @splat(0),
         // .w = @splat(1),
         // };
+
+        return colour;
     }
+
+    // if (mip_level[0] - 3 >= 0) {
+    //     return .{
+    //         .x = mip_level / @as(WarpRegister(f32), @splat(10.0)),
+    //         .y = @splat(0),
+    //         .z = @splat(0),
+    //         .w = @splat(1),
+    //     };
+    // }
 
     const level: WarpRegister(u32) = @intFromFloat(mip_level);
 
@@ -1840,9 +1845,7 @@ pub fn reciprocal(x: WarpRegister(f32)) WarpRegister(f32) {
 
 const Mat3x3 = [3][3]WarpRegister(f32);
 
-pub fn mat3x3Det(mat: Mat3x3) WarpRegister(f32) {
-    const m = &mat;
-
+pub inline fn mat3x3Det(m: Mat3x3) WarpRegister(f32) {
     const det = m[0][0] * (m[1][1] * m[2][2] - m[2][1] * m[1][2]) -
         m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) +
         m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);

@@ -60,9 +60,7 @@ pub const Context = struct {
         internal_format: i32,
         width: u32,
         height: u32,
-
-        //texture environment
-        rgb_scale: f32,
+        level_count: u32,
     }) = .empty,
     ///Maps from GL_TEXTURE_0..80
     texture_units: [80]u32 = @splat(0),
@@ -115,6 +113,10 @@ pub const Context = struct {
     } = .triangle_list,
 
     flush_callback: ?*const fn () void = null,
+
+    profile_data: struct {
+        flush_primitives_time: i128 = 0,
+    } = .{},
 };
 
 const DrawCommandState = struct {
@@ -412,7 +414,7 @@ fn internalFormatComponentCount(internal_format: i32) usize {
 pub export fn glTexImage2D(
     target: i32,
     level: i32,
-    internalFormat: i32,
+    internal_format: i32,
     width: isize,
     height: isize,
     border: i32,
@@ -433,12 +435,11 @@ pub export fn glTexImage2D(
 
     const texture = &context.textures.items[context.texture_units[context.texture_unit_active] - 1];
 
-    texture.internal_format = internalFormat;
+    texture.internal_format = internal_format;
     texture.width = @intCast(width);
     texture.height = @intCast(height);
-    texture.rgb_scale = 1;
 
-    log.info("components = 0x{x}", .{internalFormat});
+    log.info("components = 0x{x}", .{internal_format});
     log.info("format = 0x{x}", .{format});
     log.info("format_type = 0x{x}", .{_type});
 
@@ -1343,18 +1344,27 @@ pub export fn glVertex3f(x: f32, y: f32, z: f32) callconv(.c) void {
 
 fn flushPrimitives(context: *Context) void {
     const draw_command = context.draw_commands.getLast();
-    const triangle_count = draw_command.triangle_count;
-    const global_triangle_id_start = draw_command.triangle_id_start;
-
-    const group_count = @divTrunc(triangle_count, 8) + @intFromBool(@rem(triangle_count, 8) != 0);
 
     if (draw_command.triangle_count == 0) {
         return;
     }
 
-    _ = context.triangle_positions.addManyAsSlice(context.gpa, group_count) catch @panic("oom");
-    _ = context.triangle_colors.addManyAsSlice(context.gpa, triangle_count) catch @panic("oom");
-    _ = context.triangle_tex_coords.addManyAsSlice(context.gpa, triangle_count) catch @panic("oom");
+    const time_begin = std.time.nanoTimestamp();
+    defer {
+        const time_ns = std.time.nanoTimestamp() - time_begin;
+
+        context.profile_data.flush_primitives_time += time_ns;
+    }
+
+    const triangle_count = draw_command.triangle_count;
+    const global_triangle_id_start = draw_command.triangle_id_start;
+    const group_count = @divTrunc(triangle_count, 8) + @intFromBool(@rem(triangle_count, 8) != 0);
+
+    const allocator = context.gpa;
+
+    _ = context.triangle_positions.addManyAsSlice(allocator, group_count) catch @panic("oom");
+    _ = context.triangle_colors.addManyAsSlice(allocator, triangle_count) catch @panic("oom");
+    _ = context.triangle_tex_coords.addManyAsSlice(allocator, triangle_count) catch @panic("oom");
 
     switch (context.primitive_mode) {
         .triangle_list => {
@@ -1428,9 +1438,6 @@ fn flushPrimitives(context: *Context) void {
 
                     context.triangle_colors.items[triangle_id][tri_vertex_index] = context.vertex_scratch.items(.colour)[scratch_index];
                     context.triangle_tex_coords.items[triangle_id][tri_vertex_index] = context.vertex_scratch.items(.uv)[scratch_index];
-
-                    //debug visual
-                    // context.triangle_colors.items[triangle_id][tri_vertex_index] = 0xff_00_00_ff;
                 }
             }
         },
@@ -1442,7 +1449,7 @@ fn flushPrimitives(context: *Context) void {
 
                 const triangle_group = &context.triangle_positions.items[group_index];
 
-                for (0..3) |tri_vertex_index| {
+                inline for (0..3) |tri_vertex_index| {
                     const scratch_index = switch (tri_vertex_index) {
                         0 => 0,
                         1 => triangle_index + 1,
@@ -1475,7 +1482,6 @@ pub export fn glTexCoord2f(u: f32, v: f32) callconv(.c) void {
     const context = current_context.?;
 
     context.vertex_uv[0] = .{ u, v };
-    // context.vertex_uv[context.texture_unit_active] = .{ u, v };
 }
 
 pub export fn glMultiTexCoord2fARB(
@@ -1534,6 +1540,8 @@ pub export fn glFlush() callconv(.c) void {
         if (context.flush_callback != null) {
             context.flush_callback.?();
         }
+
+        context.profile_data = .{};
     }
 
     if (context.should_clear_color_attachment) {
@@ -1556,6 +1564,13 @@ pub export fn glFlush() callconv(.c) void {
 
     std.debug.print("total draw_cmds: {}\n", .{context.draw_commands.items.len});
     std.debug.print("total triangle: {}\n", .{context.triangle_count});
+    std.debug.print("flush primitives time: {}ns\n", .{context.profile_data.flush_primitives_time});
+
+    const time_begin = std.time.nanoTimestamp();
+    defer {
+        const time_ns = std.time.nanoTimestamp() - time_begin;
+        std.debug.print("glFlush: time_taken: {}ns\n", .{time_ns});
+    }
 
     var previous_mask: centralgpu.WarpRegister(bool) = @splat(false);
     var previous_group: usize = 0;
