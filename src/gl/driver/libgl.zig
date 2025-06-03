@@ -11,8 +11,8 @@ const WaylandContext = struct {
     wm_base: ?*xdg.WmBase,
 };
 
-const target_width = 1024;
-const target_height = 768;
+const target_width = 720;
+const target_height = 480;
 
 export fn glGetString(name: i32) callconv(.c) [*:0]const u8 {
     const gpa = std.heap.smp_allocator;
@@ -60,7 +60,6 @@ export fn glGetString(name: i32) callconv(.c) [*:0]const u8 {
         },
         gl_c.GL_EXTENSIONS => {
             return "GL_ARB_multitexture GL_ARB_texture_env_combine GL_ARB_texture_env_add";
-            // return "";
         },
         else => {
             std.log.info("glGetString: name = {}", .{name});
@@ -104,6 +103,8 @@ fn glFlushCallback() void {
 
     const pixel_ptr: [*]centralgpu.XRgb888 = @ptrCast(@alignCast(wayland_state.out_pixel_buffer.ptr));
 
+    const time_start_ns = std.time.nanoTimestamp();
+
     centralgpu.blitRasterTargetToLinear(
         centralgpu_gl.current_context.?.bound_render_target.pixel_ptr,
         pixel_ptr,
@@ -115,6 +116,10 @@ fn glFlushCallback() void {
         surface_width,
         surface_height,
     );
+
+    {
+        std.debug.print("blitRaster_time: {}ns\n", .{std.time.nanoTimestamp() - time_start_ns});
+    }
 
     if (wayland_state.display.roundtrip() != .SUCCESS) @panic("");
 
