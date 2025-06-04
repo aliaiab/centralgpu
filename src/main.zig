@@ -228,7 +228,7 @@ pub fn main() !void {
 
                 gl.glMatrixMode(gl.GL_PROJECTION);
                 gl.glLoadIdentity();
-                gl.glLoadMatrix(@ptrCast(&matrix_math.transpose(projection_matrix)));
+                gl.glLoadMatrixf(@ptrCast(&matrix_math.transpose(projection_matrix)));
                 gl.glScalef(1, 1, -1);
 
                 gl.glMatrixMode(gl.GL_MODELVIEW);

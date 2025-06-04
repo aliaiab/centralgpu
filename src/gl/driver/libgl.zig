@@ -87,7 +87,8 @@ pub export fn SDL_GL_GetProcAddress(
     const proc_map = std.static_string_map.StaticStringMap(*const anyopaque).initComptime(.{
         .{ "glMultiTexCoord2fARB", &centralgpu_gl.glMultiTexCoord2fARB },
         .{ "glActiveTextureARB", &centralgpu_gl.glActiveTexture },
-        .{ "glClientActiveTextureARB", &centralgpu_gl.glClientActiveTextureARB },
+        .{ "glActiveTexture", &centralgpu_gl.glActiveTexture },
+        .{ "glClientActiveTextureARB", &centralgpu_gl.glActiveTexture },
     });
 
     std.log.info("(centralgl) TRYING TO LOAD: {s}", .{proc_name});
@@ -254,7 +255,7 @@ pub fn panic(msg: []const u8, stack_trace: ?*const std.builtin.StackTrace, ra: ?
 
     std.log.err("panic: {s}", .{msg});
 
-    std.posix.exit(0);
+    std.posix.abort();
 }
 
 comptime {
