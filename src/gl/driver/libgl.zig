@@ -11,8 +11,8 @@ const WaylandContext = struct {
     wm_base: ?*xdg.WmBase,
 };
 
-const target_width = 720;
-const target_height = 480;
+const target_width = 1280;
+const target_height = 720;
 
 export fn glGetString(name: i32) callconv(.c) [*:0]const u8 {
     const gpa = std.heap.smp_allocator;
@@ -21,6 +21,14 @@ export fn glGetString(name: i32) callconv(.c) [*:0]const u8 {
         centralgpu_gl.current_context = gpa.create(centralgpu_gl.Context) catch @panic("oom");
 
         const target_buf = gpa.alloc(centralgpu.Rgba32, target_width * target_height) catch @panic("oom");
+
+        const target_padded_width = centralgpu.computeTargetPaddedSize(target_width);
+        const target_padded_height = centralgpu.computeTargetPaddedSize(target_height);
+
+        const target_tile_width = target_padded_width / centralgpu.tile_width + @intFromBool(target_width % 16 != 0);
+        const target_tile_height = target_padded_height / centralgpu.tile_height + @intFromBool(target_height % 16 != 0);
+
+        const tile_buffer = gpa.alloc(centralgpu.RasterTileBuffer.Tile, target_tile_width * target_tile_height * 2) catch @panic("oom");
 
         centralgpu_gl.current_context.?.* = .{
             .gpa = gpa,
@@ -40,6 +48,10 @@ export fn glGetString(name: i32) callconv(.c) [*:0]const u8 {
                 .y = 0,
                 .width = @intCast(target_width),
                 .height = @intCast(target_height),
+            },
+            .raster_tile_buffer = .{
+                .tile_data = tile_buffer,
+                .gpa = gpa,
             },
         };
 
@@ -109,10 +121,8 @@ fn glFlushCallback() void {
         centralgpu_gl.current_context.?.bound_render_target.pixel_ptr,
         pixel_ptr,
         centralgpu_gl.current_context.?.bound_render_target.width,
+        1280,
         720,
-        // 1600,
-        480,
-        // 900,
         surface_width,
         surface_height,
     );

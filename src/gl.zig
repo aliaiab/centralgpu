@@ -123,6 +123,8 @@ pub const Context = struct {
     profile_data: struct {
         flush_primitives_time: i128 = 0,
     } = .{},
+
+    raster_tile_buffer: centralgpu.RasterTileBuffer,
 };
 
 const DrawCommandState = struct {
@@ -230,7 +232,7 @@ pub export fn glDepthFunc(
             context.invert_depth_test = false;
         },
         GL_GEQUAL => {
-            // context.invert_depth_test = true;
+            context.invert_depth_test = true;
         },
         else => {
             std.debug.print("glDepthFunc: func: 0x{x}\n", .{func});
@@ -1562,9 +1564,9 @@ pub export fn glFlush() callconv(.c) void {
         context.should_clear_depth_attachment = false;
     }
 
-    std.debug.print("total draw_cmds: {}\n", .{context.draw_commands.items.len});
-    std.debug.print("total triangle: {}\n", .{context.triangle_count});
-    std.debug.print("flush primitives time: {}ns\n", .{context.profile_data.flush_primitives_time});
+    // std.debug.print("total draw_cmds: {}\n", .{context.draw_commands.items.len});
+    // std.debug.print("total triangle: {}\n", .{context.triangle_count});
+    // std.debug.print("flush primitives time: {}ns\n", .{context.profile_data.flush_primitives_time});
 
     const time_begin = std.time.nanoTimestamp();
     defer {
@@ -1572,8 +1574,9 @@ pub export fn glFlush() callconv(.c) void {
         std.debug.print("glFlush: time_taken: {}ns\n", .{time_ns});
     }
 
-    var previous_mask: centralgpu.WarpRegister(bool) = @splat(false);
-    var previous_group: usize = 0;
+    {
+        @memset(context.raster_tile_buffer.tile_data, .{ .triangle_count = 0, .triangles = undefined });
+    }
 
     for (context.draw_commands.items, 0..) |draw_command, draw_index| {
         _ = draw_index; // autofix
@@ -1591,25 +1594,80 @@ pub export fn glFlush() callconv(.c) void {
 
         var triangle_id_start: u32 = @intCast(draw_command.triangle_id_start);
 
+        const viewport_x: f32 = @floatFromInt(draw_command.viewport_x);
+        const viewport_y: f32 = @floatFromInt(draw_command.viewport_y);
+
+        const viewport_width: f32 = @floatFromInt(draw_command.viewport_width);
+        const viewport_height: f32 = @floatFromInt(draw_command.viewport_height);
+
+        var geometry_state: centralgpu.GeometryProcessState = .{
+            .viewport_transform = .{
+                .translation_x = viewport_x + viewport_width * 0.5,
+                .translation_y = viewport_y + viewport_height * 0.5,
+                .scale_x = viewport_width * 0.5,
+                .scale_y = viewport_height * 0.5,
+                .translation_z = (draw_command.depth_max + draw_command.depth_min) * 0.5,
+                .scale_z = (draw_command.depth_max - draw_command.depth_min) * 0.5,
+                .inverse_scale_x = undefined,
+                .inverse_scale_y = undefined,
+                .inverse_translation_x = undefined,
+                .inverse_translation_y = undefined,
+            },
+            .backface_cull = draw_command.flags.enable_backface_cull,
+        };
+        geometry_state.viewport_transform.inverse_translation_x = -geometry_state.viewport_transform.translation_x;
+        geometry_state.viewport_transform.inverse_translation_y = -geometry_state.viewport_transform.translation_y;
+
+        geometry_state.viewport_transform.inverse_scale_x = 1 / geometry_state.viewport_transform.scale_x;
+        geometry_state.viewport_transform.inverse_scale_y = 1 / geometry_state.viewport_transform.scale_y;
+
+        const raster_state: centralgpu.RasterState = .{
+            .scissor_min_x = actual_scissor_x,
+            .scissor_min_y = actual_scissor_y,
+            .scissor_max_x = actual_scissor_width,
+            .scissor_max_y = actual_scissor_height,
+            .render_target = context.bound_render_target,
+            .depth_image = context.depth_image.ptr,
+            .blend_state = draw_command.blend_state,
+            .stencil_mask = draw_command.stencil_mask,
+            .stencil_ref = draw_command.stencil_ref,
+            .flags = .{
+                .enable_depth_test = draw_command.flags.enable_depth_test,
+                .enable_alpha_test = draw_command.flags.enable_alpha_test,
+                .enable_depth_write = draw_command.flags.enable_depth_write and draw_command.flags.enable_depth_test,
+                .enable_blend = draw_command.flags.enable_blend,
+                .invert_depth_test = draw_command.flags.invert_depth_test,
+                .enable_stencil_test = draw_command.flags.enable_stencil_test,
+            },
+        };
+
+        const unfiorms: centralgpu.Uniforms = .{
+            .vertex_matrix = draw_command.vertex_matrix,
+            .vertex_positions = context.triangle_positions.items,
+            .vertex_colours = context.triangle_colors.items,
+            .vertex_texture_coords = context.triangle_tex_coords.items,
+            .image_base = draw_command.image_base,
+            .image_descriptor = draw_command.image_descriptor,
+            .texture_environments = draw_command.texture_environments,
+            .texture_rgb_scale = draw_command.texture_rgb_scale,
+            .indexed_geometry = .{
+                .indices = context.indexed_geometry.indices.items,
+                .vertex_positions = context.indexed_geometry.vertex_positions.items,
+                .vertex_colours = &.{},
+                .vertex_texture_coords = undefined,
+            },
+        };
+
+        const state_index: u32 = @intCast(context.raster_tile_buffer.stream_states.items.len);
+
+        context.raster_tile_buffer.stream_states.append(context.gpa, .{
+            .geometry_state = geometry_state,
+            .raster_state = raster_state,
+            .uniforms = unfiorms,
+        }) catch @panic("");
+
         for (triangle_group_begin..triangle_group_begin + triangle_group_count) |triangle_group_id| {
             defer triangle_id_start += 8 - @rem(triangle_id_start, 8);
-
-            const unfiorms: centralgpu.Uniforms = .{
-                .vertex_matrix = draw_command.vertex_matrix,
-                .vertex_positions = context.triangle_positions.items,
-                .vertex_colours = context.triangle_colors.items,
-                .vertex_texture_coords = context.triangle_tex_coords.items,
-                .image_base = draw_command.image_base,
-                .image_descriptor = draw_command.image_descriptor,
-                .texture_environments = draw_command.texture_environments,
-                .texture_rgb_scale = draw_command.texture_rgb_scale,
-                .indexed_geometry = .{
-                    .indices = context.indexed_geometry.indices.items,
-                    .vertex_positions = context.indexed_geometry.vertex_positions.items,
-                    .vertex_colours = &.{},
-                    .vertex_texture_coords = undefined,
-                },
-            };
 
             var triangle_mask: centralgpu.WarpRegister(bool) = @splat(true);
 
@@ -1618,36 +1676,6 @@ pub export fn glFlush() callconv(.c) void {
             triangle_id += @as(centralgpu.WarpRegister(u32), @splat(@intCast(triangle_group_id * 8)));
 
             triangle_mask = centralgpu.vectorBoolAnd(triangle_mask, triangle_id < @as(centralgpu.WarpRegister(u32), @splat(draw_command.triangle_id_start + draw_command.triangle_count)));
-
-            defer previous_mask = triangle_mask;
-            defer previous_group = triangle_group_id;
-
-            const viewport_x: f32 = @floatFromInt(draw_command.viewport_x);
-            const viewport_y: f32 = @floatFromInt(draw_command.viewport_y);
-
-            const viewport_width: f32 = @floatFromInt(draw_command.viewport_width);
-            const viewport_height: f32 = @floatFromInt(draw_command.viewport_height);
-
-            var geometry_state: centralgpu.GeometryProcessState = .{
-                .viewport_transform = .{
-                    .translation_x = viewport_x + viewport_width * 0.5,
-                    .translation_y = viewport_y + viewport_height * 0.5,
-                    .scale_x = viewport_width * 0.5,
-                    .scale_y = viewport_height * 0.5,
-                    .translation_z = (draw_command.depth_max + draw_command.depth_min) * 0.5,
-                    .scale_z = (draw_command.depth_max - draw_command.depth_min) * 0.5,
-                    .inverse_scale_x = undefined,
-                    .inverse_scale_y = undefined,
-                    .inverse_translation_x = undefined,
-                    .inverse_translation_y = undefined,
-                },
-                .backface_cull = draw_command.flags.enable_backface_cull,
-            };
-            geometry_state.viewport_transform.inverse_translation_x = -geometry_state.viewport_transform.translation_x;
-            geometry_state.viewport_transform.inverse_translation_y = -geometry_state.viewport_transform.translation_y;
-
-            geometry_state.viewport_transform.inverse_scale_x = 1 / geometry_state.viewport_transform.scale_x;
-            geometry_state.viewport_transform.inverse_scale_y = 1 / geometry_state.viewport_transform.scale_y;
 
             const projected_triangles = centralgpu.processGeometry(
                 geometry_state,
@@ -1660,33 +1688,22 @@ pub export fn glFlush() callconv(.c) void {
                 continue;
             }
 
-            centralgpu.rasterize(
+            centralgpu.rasterizeSubmit(
+                &context.raster_tile_buffer,
+                state_index,
                 geometry_state,
-                .{
-                    .scissor_min_x = actual_scissor_x,
-                    .scissor_min_y = actual_scissor_y,
-                    .scissor_max_x = actual_scissor_width,
-                    .scissor_max_y = actual_scissor_height,
-                    .render_target = context.bound_render_target,
-                    .depth_image = context.depth_image.ptr,
-                    .blend_state = draw_command.blend_state,
-                    .stencil_mask = draw_command.stencil_mask,
-                    .stencil_ref = draw_command.stencil_ref,
-                    .flags = .{
-                        .enable_depth_test = draw_command.flags.enable_depth_test,
-                        .enable_alpha_test = draw_command.flags.enable_alpha_test,
-                        .enable_depth_write = draw_command.flags.enable_depth_write and draw_command.flags.enable_depth_test,
-                        .enable_blend = draw_command.flags.enable_blend,
-                        .invert_depth_test = draw_command.flags.invert_depth_test,
-                        .enable_stencil_test = draw_command.flags.enable_stencil_test,
-                    },
-                },
+                raster_state,
                 unfiorms,
                 triangle_group_id * 8,
                 projected_triangles,
             );
         }
     }
+
+    centralgpu.rasterizerFlushTiles(context.bound_render_target, &context.raster_tile_buffer);
+
+    context.raster_tile_buffer.stream_states.clearRetainingCapacity();
+    context.raster_tile_buffer.stream_triangles.clearRetainingCapacity();
 
     context.indexed_geometry.indices.clearRetainingCapacity();
     context.indexed_geometry.vertex_positions.clearRetainingCapacity();
