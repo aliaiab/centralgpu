@@ -368,35 +368,32 @@ pub fn processGeometry(
 
         out_triangle[vertex_index] = transformed_vertex;
 
-        //mostly for debugging
-        const cull_scale: WarpRegister(f32) = @splat(1);
-
         cull_mask_x = vectorBoolAnd(
             cull_mask_x,
-            vectorBoolNot(vectorBoolAnd(
-                -out_triangle[vertex_index].w * cull_scale <= out_triangle[vertex_index].x,
-                out_triangle[vertex_index].x <= out_triangle[vertex_index].w * cull_scale,
-            )),
+            vectorBoolOr(
+                out_triangle[vertex_index].x < -out_triangle[vertex_index].w,
+                out_triangle[vertex_index].x > out_triangle[vertex_index].w,
+            ),
         );
 
         cull_mask_y = vectorBoolAnd(
             cull_mask_y,
-            vectorBoolNot(vectorBoolAnd(
-                -out_triangle[vertex_index].w * cull_scale <= out_triangle[vertex_index].y,
-                out_triangle[vertex_index].y <= out_triangle[vertex_index].w * cull_scale,
-            )),
+            vectorBoolOr(
+                out_triangle[vertex_index].y < -out_triangle[vertex_index].w,
+                out_triangle[vertex_index].y > out_triangle[vertex_index].w,
+            ),
         );
 
         cull_mask_z = vectorBoolAnd(
             cull_mask_z,
-            vectorBoolNot(vectorBoolAnd(
-                -out_triangle[vertex_index].w <= out_triangle[vertex_index].z,
-                out_triangle[vertex_index].z <= out_triangle[vertex_index].w,
-            )),
+            vectorBoolOr(
+                out_triangle[vertex_index].z < -out_triangle[vertex_index].w,
+                out_triangle[vertex_index].z > out_triangle[vertex_index].w,
+            ),
         );
     }
 
-    const cull_mask = vectorBoolOr(cull_mask_x, vectorBoolOr(cull_mask_y, cull_mask_z));
+    const cull_mask = vectorBoolOr(cull_mask_z, vectorBoolOr(cull_mask_x, cull_mask_y));
 
     out_mask = vectorBoolAnd(out_mask, vectorBoolNot(cull_mask));
 

@@ -1,4 +1,4 @@
-//! Central GL: An implementation of opengl 1.3
+//! Central GL: An implementation of opengl 1.5
 
 pub const Context = struct {
     gpa: std.mem.Allocator,
@@ -60,12 +60,12 @@ pub const Context = struct {
         .border_colour_shift_amount = 0,
     },
     textures: std.ArrayListUnmanaged(struct {
-        texture_data: []centralgpu.Rgba32,
-        descriptor: centralgpu.ImageDescriptor,
-        internal_format: i32,
-        width: u32,
-        height: u32,
-        level_count: u32,
+        texture_data: []centralgpu.Rgba32 = &.{},
+        descriptor: centralgpu.ImageDescriptor = undefined,
+        internal_format: i32 = 0,
+        width: u32 = 0,
+        height: u32 = 0,
+        level_count: u32 = 0,
     }) = .empty,
     ///Maps from GL_TEXTURE_0..80
     texture_units: [80]u32 = @splat(0),
@@ -86,13 +86,20 @@ pub const Context = struct {
         uv: [4][2]f32,
     }) = .empty,
 
+    vertex_array: struct {
+        vertex_pointer: ?[*]const f32 = null,
+        color_pointer: ?[*]const f32 = null,
+        tex_coord_pointer: [4]?[*]const f32 = [1]?[*]const f32{null} ** 4,
+        vertex_component_count: u32 = 0,
+    } = .{},
+
     draw_commands: std.ArrayListUnmanaged(DrawCommandState) = .empty,
 
     //Draw state
     enable_alpha_test: bool = false,
     enable_scissor_test: bool = false,
     enable_depth_test: bool = false,
-    enable_depth_write: bool = false,
+    enable_depth_write: bool = true,
     enable_stencil_test: bool = false,
     enable_face_cull: bool = false,
     enable_blend: bool = false,
@@ -125,9 +132,13 @@ pub const Context = struct {
     } = .{},
 
     raster_tile_buffer: centralgpu.RasterTileBuffer,
+
+    pixel_store: struct {
+        unpack_row_length: usize = 0,
+    } = .{},
 };
 
-const DrawCommandState = struct {
+pub const DrawCommandState = struct {
     triangle_id_start: u32,
     triangle_count: u32,
 
@@ -289,6 +300,8 @@ pub export fn glStencilOp(
     }
 }
 
+pub export fn glGetFloatv() callconv(.c) void {}
+
 pub export fn glGetIntegerv(
     pname: i32,
     params: [*c]i32,
@@ -384,6 +397,8 @@ pub export fn glTexSubImage2D(
     const end_x: usize = @intCast(x_offset + width);
     const end_y: usize = @intCast(y_offset + height);
 
+    const row_width: usize = if (context.pixel_store.unpack_row_length == 0) @intCast(width) else context.pixel_store.unpack_row_length;
+
     var y: usize = start_y;
 
     while (y < end_y) : (y += 1) {
@@ -395,12 +410,212 @@ pub export fn glTexSubImage2D(
 
             const actual_y: usize = (@as(usize, @intCast(texture.height - 1)) - y);
             _ = actual_y; // autofix
-            const src_index = @as(usize, @intCast(src_y)) * @as(usize, @intCast(width)) + src_x;
+            // const src_index = @as(usize, @intCast(src_y)) * @as(usize, @intCast(width)) + src_x;
+            const src_index = @as(usize, @intCast(src_y)) * row_width + src_x;
             const index = centralgpu.mortonEncode(@splat(@intCast(x)), @splat(@intCast(y)))[0];
 
             dest_data_ptr[index] = readSrcPixel(_type, data, component_count, src_index);
         }
     }
+}
+
+pub export fn glDrawBuffer() callconv(.c) void {}
+
+pub export fn glEnableClientState(
+    cap: i32,
+) callconv(.c) void {
+    switch (cap) {
+        GL_COLOR_ARRAY => {},
+        else => {},
+    }
+}
+
+pub export fn glDisableClientState(
+    cap: i32,
+) callconv(.c) void {
+    const context = current_context.?;
+
+    switch (cap) {
+        GL_COLOR_ARRAY => {
+            context.vertex_array.color_pointer = null;
+        },
+        GL_TEXTURE_COORD_ARRAY => {
+            for (&context.vertex_array.tex_coord_pointer) |*ptr| {
+                ptr.* = null;
+            }
+        },
+        GL_VERTEX_ARRAY => {
+            context.vertex_array.vertex_pointer = null;
+        },
+        else => {},
+    }
+}
+
+pub export fn glVertexPointer(
+    size: i32,
+    @"type": i32,
+    stride: isize,
+    ptr: *const anyopaque,
+) callconv(.c) void {
+    _ = stride; // autofix
+    _ = @"type";
+
+    const context = current_context.?;
+
+    context.vertex_array.vertex_pointer = @ptrCast(@alignCast(ptr));
+    context.vertex_array.vertex_component_count = @intCast(size);
+}
+
+pub export fn glTexCoordPointer(
+    size: i32,
+    @"type": i32,
+    stride: isize,
+    ptr: *const anyopaque,
+) callconv(.c) void {
+    _ = size; // autofix
+    _ = stride; // autofix
+    _ = @"type";
+    const context = current_context.?;
+    context.vertex_array.tex_coord_pointer[context.texture_unit_active] = @ptrCast(@alignCast(ptr));
+}
+
+pub export fn glColorPointer(
+    size: i32,
+    @"type": i32,
+    stride: isize,
+    ptr: *const anyopaque,
+) callconv(.c) void {
+    _ = size; // autofix
+    _ = stride; // autofix
+    _ = @"type";
+    const context = current_context.?;
+    context.vertex_array.color_pointer = @ptrCast(@alignCast(ptr));
+}
+
+pub export fn glDrawArrays(
+    mode: i32,
+    first: i32,
+    count: isize,
+) callconv(.c) void {
+    _ = first; // autofix
+
+    switch (mode) {
+        GL_TRIANGLES, GL_TRIANGLE_FAN, GL_TRIANGLE_STRIP, GL_POLYGON => {},
+        else => return,
+    }
+
+    const context = current_context.?;
+
+    const old_color = context.vertex_colour;
+    defer {
+        context.vertex_colour = old_color;
+    }
+
+    glBegin(@bitCast(mode));
+
+    for (0..@intCast(count)) |vertex_index| {
+        for (context.vertex_array.tex_coord_pointer, 0..) |tex_ptr, unit| {
+            if (tex_ptr != null) {
+                const u = tex_ptr.?[vertex_index * 2 + 0];
+                const v = tex_ptr.?[vertex_index * 2 + 1];
+
+                glMultiTexCoord2fARB(@as(i32, @intCast(unit)) + GL_TEXTURE0, u, v);
+            }
+        }
+
+        if (context.vertex_array.color_pointer != null) {
+            const r = context.vertex_array.color_pointer.?[vertex_index * 4 + 0];
+            const g = context.vertex_array.color_pointer.?[vertex_index * 4 + 1];
+            const b = context.vertex_array.color_pointer.?[vertex_index * 4 + 2];
+            const a = context.vertex_array.color_pointer.?[vertex_index * 4 + 3];
+
+            glColor4f(r, g, b, a);
+        }
+
+        switch (context.vertex_array.vertex_component_count) {
+            2 => {
+                const x = context.vertex_array.vertex_pointer.?[vertex_index * context.vertex_array.vertex_component_count + 0];
+                const y = context.vertex_array.vertex_pointer.?[vertex_index * context.vertex_array.vertex_component_count + 1];
+
+                glVertex2f(x, y);
+            },
+            3 => {
+                const x = context.vertex_array.vertex_pointer.?[vertex_index * context.vertex_array.vertex_component_count + 0];
+                const y = context.vertex_array.vertex_pointer.?[vertex_index * context.vertex_array.vertex_component_count + 1];
+                const z = context.vertex_array.vertex_pointer.?[vertex_index * context.vertex_array.vertex_component_count + 2];
+
+                glVertex3f(x, y, z);
+            },
+            else => @panic("vertex_component_count not supported"),
+        }
+    }
+
+    glEnd();
+}
+
+pub export fn glDrawElements(
+    mode: i32,
+    count: isize,
+    @"type": i32,
+    indices: *const anyopaque,
+) callconv(.c) void {
+    _ = @"type";
+    switch (mode) {
+        GL_TRIANGLES, GL_TRIANGLE_FAN, GL_TRIANGLE_STRIP, GL_POLYGON => {},
+        else => return,
+    }
+
+    const context = current_context.?;
+
+    const old_color = context.vertex_colour;
+    defer {
+        context.vertex_colour = old_color;
+    }
+
+    const indices_u16: [*]const u16 = @ptrCast(@alignCast(indices));
+
+    glBegin(@bitCast(mode));
+
+    for (0..@intCast(count)) |element_index| {
+        const vertex_index: usize = indices_u16[element_index];
+
+        for (context.vertex_array.tex_coord_pointer, 0..) |tex_ptr, unit| {
+            if (tex_ptr != null) {
+                const u = tex_ptr.?[vertex_index * 2 + 0];
+                const v = tex_ptr.?[vertex_index * 2 + 1];
+
+                glMultiTexCoord2fARB(@as(i32, @intCast(unit)) + GL_TEXTURE0, u, v);
+            }
+        }
+
+        if (context.vertex_array.color_pointer != null) {
+            const r = context.vertex_array.color_pointer.?[vertex_index * 4 + 0];
+            const g = context.vertex_array.color_pointer.?[vertex_index * 4 + 1];
+            const b = context.vertex_array.color_pointer.?[vertex_index * 4 + 2];
+            const a = context.vertex_array.color_pointer.?[vertex_index * 4 + 3];
+
+            glColor4f(r, g, b, a);
+        }
+
+        switch (context.vertex_array.vertex_component_count) {
+            2 => {
+                const x = context.vertex_array.vertex_pointer.?[vertex_index * context.vertex_array.vertex_component_count + 0];
+                const y = context.vertex_array.vertex_pointer.?[vertex_index * context.vertex_array.vertex_component_count + 1];
+
+                glVertex2f(x, y);
+            },
+            3 => {
+                const x = context.vertex_array.vertex_pointer.?[vertex_index * context.vertex_array.vertex_component_count + 0];
+                const y = context.vertex_array.vertex_pointer.?[vertex_index * context.vertex_array.vertex_component_count + 1];
+                const z = context.vertex_array.vertex_pointer.?[vertex_index * context.vertex_array.vertex_component_count + 2];
+
+                glVertex3f(x, y, z);
+            },
+            else => @panic("vertex_component_count not supported"),
+        }
+    }
+
+    glEnd();
 }
 
 fn internalFormatComponentCount(internal_format: i32) usize {
@@ -410,13 +625,32 @@ fn internalFormatComponentCount(internal_format: i32) usize {
 
     switch (internal_format) {
         GL_RGB10_A2,
+        GL_RGBA,
         => {
             return 4;
+        },
+        GL_RGB => {
+            return 3;
         },
         else => {
             log.info("internalFormat: 0x{x}", .{internal_format});
             @panic("internalFormat out of range");
         },
+    }
+}
+
+pub export fn glPixelStorei(
+    pname: i32,
+    param: i32,
+) callconv(.c) void {
+    std.debug.print("glPixelStorei: 0x{x}, 0x{x}\n", .{ pname, param });
+    const context = current_context.?;
+
+    switch (pname) {
+        GL_UNPACK_ROW_LENGTH => {
+            context.pixel_store.unpack_row_length = @intCast(param);
+        },
+        else => {},
     }
 }
 
@@ -438,6 +672,10 @@ pub export fn glTexImage2D(
     }
 
     if (level != 0) {
+        return;
+    }
+
+    if (context.texture_units[context.texture_unit_active] == 0) {
         return;
     }
 
@@ -517,7 +755,7 @@ pub export fn glGenTextures(
 
     const id_start: u32 = @intCast(context.textures.items.len + 1);
 
-    context.textures.appendNTimes(context.gpa, undefined, @intCast(n)) catch @panic("oom");
+    context.textures.appendNTimes(context.gpa, .{}, @intCast(n)) catch @panic("oom");
 
     for (0..@as(usize, @intCast(n))) |k| {
         textures[k] = id_start + @as(u32, @intCast(k));
@@ -568,8 +806,10 @@ pub export fn glBindTexture(
     const binding_index: usize = @intCast(target - GL_TEXTURE_2D);
     _ = binding_index; // autofix
 
-    if (texture == context.textures.items.len) {
-        _ = context.textures.addOne(context.gpa) catch @panic("");
+    if (texture != 0 and texture - 1 >= context.textures.items.len) {
+        const many_to_add = (texture) - @as(u32, @intCast(context.textures.items.len));
+
+        context.textures.appendNTimes(context.gpa, .{}, many_to_add) catch @panic("oom");
     }
 
     std.debug.assert(texture < context.textures.items.len);
@@ -709,8 +949,6 @@ pub export fn glGenerateMipmap(
     _ = target; // autofix
 }
 
-pub export fn glDrawElements() callconv(.c) void {}
-
 pub export fn glBegin(flags: u32) callconv(.c) void {
     const context = current_context.?;
 
@@ -743,9 +981,6 @@ pub export fn glBegin(flags: u32) callconv(.c) void {
     std.debug.assert(!context.has_begun);
 
     context.has_begun = true;
-
-    const need_new_command = context.draw_commands.items.len == 0 or new_polygon_mode != previous_polygon_mode;
-    _ = need_new_command; // autofix
 
     startCommand(context);
 
@@ -862,6 +1097,10 @@ fn endCommand(context: *Context) void {
     last_command.scratch_vertex_end = @intCast(context.vertex_scratch.len);
 
     const command_scratch_vertex_count = last_command.scratch_vertex_end - last_command.scratch_vertex_start;
+
+    if (command_scratch_vertex_count == 0) {
+        return;
+    }
 
     var triangle_count: usize = 0;
 
@@ -1173,7 +1412,7 @@ pub export fn glPopMatrix() callconv(.c) void {
     }
 }
 
-pub export fn glLoadMatrix(matrix: *const [16]f32) callconv(.c) void {
+pub export fn glLoadMatrixf(matrix: *const [16]f32) callconv(.c) void {
     currentMatrix().* = matrix.*;
 }
 
@@ -1238,14 +1477,6 @@ pub export fn glFrustum(
     const near_val: f32 = @floatCast(_near_val);
     const far_val: f32 = @floatCast(_far_val);
 
-    // const x = (2.0 * near_val) / (right - left);
-    // const y = (2.0 * near_val) / (top - bottom);
-
-    // const a: f32 = (right + left) / (right - left);
-    // const b: f32 = (top + bottom) / (top - bottom);
-    // const c: f32 = -(far_val + near_val) / (far_val - near_val);
-    // const d: f32 = -(2 * far_val * near_val) / (far_val - near_val);
-
     const nearval = near_val;
     const farval = far_val;
 
@@ -1273,15 +1504,7 @@ pub export fn glFrustum(
 
     // zig fmt: on
 
-    // frustum_matrix = .{
-    //     (2 * near_val) / (right - left), 0,                               a,  0,
-    //     0,                               (2 * near_val) / (top - bottom), b,  0,
-    //     0,                               0,                               c,  d,
-    //     0,                               0,                               -1, 0,
-    // };
-
     glMultMatrixf(&frustum_matrix);
-    // glMultTransposeMatrixf(&frustum_matrix);
 }
 
 pub export fn glOrtho(
@@ -1496,10 +1719,6 @@ pub export fn glMultiTexCoord2fARB(
     context.vertex_uv[texture_unit] = .{ u, v };
 }
 
-pub export fn glClientActiveTextureARB() callconv(.c) void {
-    @panic("");
-}
-
 pub export fn glVertex2f(x: f32, y: f32) callconv(.c) void {
     glVertex3f(x, y, 0);
 }
@@ -1544,7 +1763,7 @@ pub export fn glFlush() callconv(.c) void {
         context.profile_data = .{};
     }
 
-    if (context.should_clear_color_attachment) {
+    if (context.should_clear_color_attachment or true) {
         const colour_image_words: []u32 = @ptrCast(@alignCast(context.bound_render_target.pixel_ptr[0 .. context.bound_render_target.width * context.bound_render_target.height]));
 
         const colour_image: []@Vector(8, u32) = @ptrCast(@alignCast(colour_image_words));
@@ -1554,7 +1773,7 @@ pub export fn glFlush() callconv(.c) void {
         context.should_clear_color_attachment = false;
     }
 
-    if (context.should_clear_depth_attachment) {
+    if (context.should_clear_depth_attachment or true) {
         //TODO: handle not clearing the stencil values
         const depth_clear = centralgpu.packDepthStencil(@splat(0), @splat(0xff));
         const depth_image: []@Vector(8, u32) = @ptrCast(@alignCast(context.depth_image));
@@ -2095,6 +2314,96 @@ pub const GL_DEPTH_FUNC: i32 = 0x0B74;
 pub const GL_DEPTH_RANGE: i32 = 0x0B70;
 pub const GL_DEPTH_WRITEMASK: i32 = 0x0B72;
 pub const GL_DEPTH_COMPONENT: i32 = 0x1902;
+
+pub const GL_VERTEX_ARRAY: i32 = 0x8074;
+pub const GL_NORMAL_ARRAY: i32 = 0x8075;
+pub const GL_COLOR_ARRAY: i32 = 0x8076;
+pub const GL_INDEX_ARRAY: i32 = 0x8077;
+pub const GL_TEXTURE_COORD_ARRAY: i32 = 0x8078;
+pub const GL_EDGE_FLAG_ARRAY: i32 = 0x8079;
+pub const GL_VERTEX_ARRAY_SIZE: i32 = 0x807A;
+pub const GL_VERTEX_ARRAY_TYPE: i32 = 0x807B;
+pub const GL_VERTEX_ARRAY_STRIDE: i32 = 0x807C;
+pub const GL_NORMAL_ARRAY_TYPE: i32 = 0x807E;
+pub const GL_NORMAL_ARRAY_STRIDE: i32 = 0x807F;
+pub const GL_COLOR_ARRAY_SIZE: i32 = 0x8081;
+pub const GL_COLOR_ARRAY_TYPE: i32 = 0x8082;
+pub const GL_COLOR_ARRAY_STRIDE: i32 = 0x8083;
+pub const GL_INDEX_ARRAY_TYPE: i32 = 0x8085;
+pub const GL_INDEX_ARRAY_STRIDE: i32 = 0x8086;
+pub const GL_TEXTURE_COORD_ARRAY_SIZE: i32 = 0x8088;
+pub const GL_TEXTURE_COORD_ARRAY_TYPE: i32 = 0x8089;
+pub const GL_TEXTURE_COORD_ARRAY_STRIDE: i32 = 0x808A;
+pub const GL_EDGE_FLAG_ARRAY_STRIDE: i32 = 0x808C;
+pub const GL_VERTEX_ARRAY_POINTER: i32 = 0x808E;
+pub const GL_NORMAL_ARRAY_POINTER: i32 = 0x808F;
+pub const GL_COLOR_ARRAY_POINTER: i32 = 0x8090;
+pub const GL_INDEX_ARRAY_POINTER: i32 = 0x8091;
+pub const GL_TEXTURE_COORD_ARRAY_POINTER: i32 = 0x8092;
+pub const GL_EDGE_FLAG_ARRAY_POINTER: i32 = 0x8093;
+pub const GL_V2F: i32 = 0x2A20;
+pub const GL_V3F: i32 = 0x2A21;
+pub const GL_C4UB_V2F: i32 = 0x2A22;
+pub const GL_C4UB_V3F: i32 = 0x2A23;
+pub const GL_C3F_V3F: i32 = 0x2A24;
+pub const GL_N3F_V3F: i32 = 0x2A25;
+pub const GL_C4F_N3F_V3F: i32 = 0x2A26;
+pub const GL_T2F_V3F: i32 = 0x2A27;
+pub const GL_T4F_V4F: i32 = 0x2A28;
+pub const GL_T2F_C4UB_V3F: i32 = 0x2A29;
+pub const GL_T2F_C3F_V3F: i32 = 0x2A2A;
+pub const GL_T2F_N3F_V3F: i32 = 0x2A2B;
+pub const GL_T2F_C4F_N3F_V3F: i32 = 0x2A2C;
+pub const GL_T4F_C4F_N3F_V4F: i32 = 0x2A2D;
+
+pub const GL_MAP_COLOR: i32 = 0x0D10;
+pub const GL_MAP_STENCIL: i32 = 0x0D11;
+pub const GL_INDEX_SHIFT: i32 = 0x0D12;
+pub const GL_INDEX_OFFSET: i32 = 0x0D13;
+pub const GL_RED_SCALE: i32 = 0x0D14;
+pub const GL_RED_BIAS: i32 = 0x0D15;
+pub const GL_GREEN_SCALE: i32 = 0x0D18;
+pub const GL_GREEN_BIAS: i32 = 0x0D19;
+pub const GL_BLUE_SCALE: i32 = 0x0D1A;
+pub const GL_BLUE_BIAS: i32 = 0x0D1B;
+pub const GL_ALPHA_SCALE: i32 = 0x0D1C;
+pub const GL_ALPHA_BIAS: i32 = 0x0D1D;
+pub const GL_DEPTH_SCALE: i32 = 0x0D1E;
+pub const GL_DEPTH_BIAS: i32 = 0x0D1F;
+pub const GL_PIXEL_MAP_S_TO_S_SIZE: i32 = 0x0CB1;
+pub const GL_PIXEL_MAP_I_TO_I_SIZE: i32 = 0x0CB0;
+pub const GL_PIXEL_MAP_I_TO_R_SIZE: i32 = 0x0CB2;
+pub const GL_PIXEL_MAP_I_TO_G_SIZE: i32 = 0x0CB3;
+pub const GL_PIXEL_MAP_I_TO_B_SIZE: i32 = 0x0CB4;
+pub const GL_PIXEL_MAP_I_TO_A_SIZE: i32 = 0x0CB5;
+pub const GL_PIXEL_MAP_R_TO_R_SIZE: i32 = 0x0CB6;
+pub const GL_PIXEL_MAP_G_TO_G_SIZE: i32 = 0x0CB7;
+pub const GL_PIXEL_MAP_B_TO_B_SIZE: i32 = 0x0CB8;
+pub const GL_PIXEL_MAP_A_TO_A_SIZE: i32 = 0x0CB9;
+pub const GL_PIXEL_MAP_S_TO_S: i32 = 0x0C71;
+pub const GL_PIXEL_MAP_I_TO_I: i32 = 0x0C70;
+pub const GL_PIXEL_MAP_I_TO_R: i32 = 0x0C72;
+pub const GL_PIXEL_MAP_I_TO_G: i32 = 0x0C73;
+pub const GL_PIXEL_MAP_I_TO_B: i32 = 0x0C74;
+pub const GL_PIXEL_MAP_I_TO_A: i32 = 0x0C75;
+pub const GL_PIXEL_MAP_R_TO_R: i32 = 0x0C76;
+pub const GL_PIXEL_MAP_G_TO_G: i32 = 0x0C77;
+pub const GL_PIXEL_MAP_B_TO_B: i32 = 0x0C78;
+pub const GL_PIXEL_MAP_A_TO_A: i32 = 0x0C79;
+pub const GL_PACK_ALIGNMENT: i32 = 0x0D05;
+pub const GL_PACK_LSB_FIRST: i32 = 0x0D01;
+pub const GL_PACK_ROW_LENGTH: i32 = 0x0D02;
+pub const GL_PACK_SKIP_PIXELS: i32 = 0x0D04;
+pub const GL_PACK_SKIP_ROWS: i32 = 0x0D03;
+pub const GL_PACK_SWAP_BYTES: i32 = 0x0D00;
+pub const GL_UNPACK_ALIGNMENT: i32 = 0x0CF5;
+pub const GL_UNPACK_LSB_FIRST: i32 = 0x0CF1;
+pub const GL_UNPACK_ROW_LENGTH: i32 = 0x0CF2;
+pub const GL_UNPACK_SKIP_PIXELS: i32 = 0x0CF4;
+pub const GL_UNPACK_SKIP_ROWS: i32 = 0x0CF3;
+pub const GL_UNPACK_SWAP_BYTES: i32 = 0x0CF0;
+pub const GL_ZOOM_X: i32 = 0x0D16;
+pub const GL_ZOOM_Y: i32 = 0x0D17;
 
 const log = std.log.scoped(.centralgpu_gl);
 const std = @import("std");
