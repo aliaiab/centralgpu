@@ -1181,40 +1181,7 @@ pub fn rasterizeTileTriangles(
                         color_result.y = @select(f32, is_on_edge, one, color_result.y);
                         color_result.z = @select(f32, is_on_edge, zero, color_result.z);
                         color_result.w = @select(f32, is_on_edge, one, color_result.w);
-
-                        // execution_mask &= @intFromBool(is_on_edge);
                     }
-
-                    // if (visualize_triangle_boxes) {
-                    //     var is_on_bounds: WarpRegister(bool) = @splat(false);
-
-                    //     is_on_bounds = vectorBoolOr(is_on_bounds, point_x_int == @as(WarpRegister(i32), @splat(start_x)));
-                    //     is_on_bounds = vectorBoolOr(is_on_bounds, point_x_int == @as(WarpRegister(i32), @splat(end_x - 1)));
-
-                    //     is_on_bounds = vectorBoolOr(is_on_bounds, point_y_int == @as(WarpRegister(i32), @splat(start_y)));
-                    //     is_on_bounds = vectorBoolOr(is_on_bounds, point_y_int == @as(WarpRegister(i32), @splat(end_y - 1)));
-
-                    //     is_on_bounds = vectorBoolAnd(is_on_bounds, point_x_int >= @as(WarpRegister(i32), @splat(start_x)));
-                    //     is_on_bounds = vectorBoolAnd(is_on_bounds, point_x_int <= @as(WarpRegister(i32), @splat(end_x - 1)));
-
-                    //     is_on_bounds = vectorBoolAnd(is_on_bounds, point_y_int >= @as(WarpRegister(i32), @splat(start_y)));
-                    //     is_on_bounds = vectorBoolAnd(is_on_bounds, point_y_int <= @as(WarpRegister(i32), @splat(end_y - 1)));
-
-                    //     is_on_bounds = vectorBoolAnd(is_on_bounds, @splat(vertex_w_0[0] < 0 or vertex_w_1[0] < 0 or vertex_w_2[0] < 0));
-
-                    //     const one: WarpRegister(f32) = @splat(1);
-                    //     const zero: WarpRegister(f32) = @splat(0);
-                    //     _ = zero; // autofix
-
-                    //     const box_colour = triangle_vis_colour;
-
-                    //     color_result.x = @select(f32, is_on_bounds, box_colour.x, color_result.x);
-                    //     color_result.y = @select(f32, is_on_bounds, box_colour.y, color_result.y);
-                    //     color_result.z = @select(f32, is_on_bounds, box_colour.z, color_result.z);
-                    //     color_result.w = @select(f32, is_on_bounds, one, color_result.w);
-
-                    //     execution_mask |= @intFromBool(is_on_bounds);
-                    // }
 
                     const packed_color = packUnorm4x(color_result);
 
@@ -1927,25 +1894,25 @@ pub inline fn mortonPart1by1Scalar(x_in: usize) usize {
 pub fn vectorBoolAnd(a: WarpRegister(bool), b: WarpRegister(bool)) WarpRegister(bool) {
     const a_int = @intFromBool(a);
     const b_int = @intFromBool(b);
-    const anded = a_int & b_int;
+    const result = a_int & b_int;
 
-    return anded == @as(WarpRegister(u1), @splat(1));
+    return result == @as(WarpRegister(u1), @splat(1));
 }
 
 pub fn vectorBoolOr(a: WarpRegister(bool), b: WarpRegister(bool)) WarpRegister(bool) {
     const a_int = @intFromBool(a);
     const b_int = @intFromBool(b);
-    const anded = a_int | b_int;
+    const result = a_int | b_int;
 
-    return anded == @as(WarpRegister(u1), @splat(1));
+    return result == @as(WarpRegister(u1), @splat(1));
 }
 
 pub fn vectorBoolXor(a: WarpRegister(bool), b: WarpRegister(bool)) WarpRegister(bool) {
     const a_int = @intFromBool(a);
     const b_int = @intFromBool(b);
-    const anded = a_int ^ b_int;
+    const result = a_int ^ b_int;
 
-    return anded == @as(WarpRegister(u1), @splat(1));
+    return result == @as(WarpRegister(u1), @splat(1));
 }
 
 pub fn vectorBoolNot(a: WarpRegister(bool)) WarpRegister(bool) {
