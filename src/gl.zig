@@ -1783,8 +1783,8 @@ pub export fn glFlush() callconv(.c) void {
         context.should_clear_depth_attachment = false;
     }
 
-    // std.debug.print("total draw_cmds: {}\n", .{context.draw_commands.items.len});
-    // std.debug.print("total triangle: {}\n", .{context.triangle_count});
+    std.debug.print("total draw_cmds: {}\n", .{context.draw_commands.items.len});
+    std.debug.print("total triangle: {}\n", .{context.triangle_count});
     // std.debug.print("flush primitives time: {}ns\n", .{context.profile_data.flush_primitives_time});
 
     const time_begin = std.time.nanoTimestamp();
@@ -1796,6 +1796,8 @@ pub export fn glFlush() callconv(.c) void {
     {
         @memset(context.raster_tile_buffer.tile_data, .{ .triangle_count = 0, .triangles = undefined });
     }
+
+    const rasterizer_submit_time = std.time.nanoTimestamp();
 
     for (context.draw_commands.items, 0..) |draw_command, draw_index| {
         _ = draw_index; // autofix
@@ -1919,7 +1921,17 @@ pub export fn glFlush() callconv(.c) void {
         }
     }
 
+    {
+        std.debug.print("rasterizer_submit_time: {}ns\n", .{std.time.nanoTimestamp() - rasterizer_submit_time});
+    }
+
+    const rasterizer_flush_time = std.time.nanoTimestamp();
+
     centralgpu.rasterizerFlushTiles(context.bound_render_target, &context.raster_tile_buffer);
+
+    {
+        std.debug.print("rasterizer_flush_time: {}ns\n", .{std.time.nanoTimestamp() - rasterizer_flush_time});
+    }
 
     context.raster_tile_buffer.stream_states.clearRetainingCapacity();
     context.raster_tile_buffer.stream_triangles.clearRetainingCapacity();

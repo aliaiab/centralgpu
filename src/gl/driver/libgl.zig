@@ -11,8 +11,11 @@ const WaylandContext = struct {
     wm_base: ?*xdg.WmBase,
 };
 
-const target_width = 1280;
-const target_height = 720;
+// const target_width = 1280;
+// const target_height = 720;
+
+const target_width = 720;
+const target_height = 480;
 
 export fn glGetString(name: i32) callconv(.c) [*:0]const u8 {
     const gpa = std.heap.smp_allocator;
@@ -28,7 +31,7 @@ export fn glGetString(name: i32) callconv(.c) [*:0]const u8 {
         const target_tile_width = target_padded_width / centralgpu.tile_width + @intFromBool(target_width % 16 != 0);
         const target_tile_height = target_padded_height / centralgpu.tile_height + @intFromBool(target_height % 16 != 0);
 
-        const tile_buffer = gpa.alloc(centralgpu.RasterTileBuffer.Tile, target_tile_width * target_tile_height * 2) catch @panic("oom");
+        const tile_buffer = gpa.alloc(centralgpu.RasterTileBuffer.Tile, target_tile_width * target_tile_height) catch @panic("oom");
 
         centralgpu_gl.current_context.?.* = .{
             .gpa = gpa,
@@ -52,8 +55,13 @@ export fn glGetString(name: i32) callconv(.c) [*:0]const u8 {
             .raster_tile_buffer = .{
                 .tile_data = tile_buffer,
                 .gpa = gpa,
+                .thread_pool = undefined,
             },
         };
+
+        centralgpu_gl.current_context.?.raster_tile_buffer.thread_pool.init(.{
+            .allocator = gpa,
+        }) catch @panic("oom");
 
         initWayland() catch |e| {
             @panic(@errorName(e));
@@ -91,7 +99,7 @@ pub export fn SDL_GL_GetProcAddress(
         .{ "glClientActiveTextureARB", &centralgpu_gl.glActiveTexture },
     });
 
-    std.log.info("(centralgl) TRYING TO LOAD: {s}", .{proc_name});
+    std.debug.print("(centralgl) TRYING TO LOAD: {s}\n", .{proc_name});
 
     if (proc_map.get(std.mem.span(proc_name))) |proc| {
         return proc;
@@ -122,8 +130,10 @@ fn glFlushCallback() void {
         centralgpu_gl.current_context.?.bound_render_target.pixel_ptr,
         pixel_ptr,
         centralgpu_gl.current_context.?.bound_render_target.width,
-        1280,
+        // 1280,
+        // 720,
         720,
+        480,
         surface_width,
         surface_height,
     );

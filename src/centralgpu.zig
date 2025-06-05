@@ -317,9 +317,14 @@ pub fn processGeometry(
     var out_triangle: [3]WarpVec4(f32) = undefined;
     var out_mask = input_mask;
 
-    var cull_mask_x: WarpRegister(bool) = @splat(true);
-    var cull_mask_y: WarpRegister(bool) = @splat(true);
-    var cull_mask_z: WarpRegister(bool) = @splat(true);
+    var cull_mask_x_lt: WarpRegister(bool) = @splat(true);
+    var cull_mask_x_gt: WarpRegister(bool) = @splat(true);
+
+    var cull_mask_y_lt: WarpRegister(bool) = @splat(true);
+    var cull_mask_y_gt: WarpRegister(bool) = @splat(true);
+
+    var cull_mask_z_lt: WarpRegister(bool) = @splat(true);
+    var cull_mask_z_gt: WarpRegister(bool) = @splat(true);
 
     const vertex_matrix: Mat4x4(f32) = .{
         .rows = .{
@@ -368,30 +373,40 @@ pub fn processGeometry(
 
         out_triangle[vertex_index] = transformed_vertex;
 
-        cull_mask_x = vectorBoolAnd(
-            cull_mask_x,
-            vectorBoolOr(
-                out_triangle[vertex_index].x < -out_triangle[vertex_index].w,
-                out_triangle[vertex_index].x > out_triangle[vertex_index].w,
-            ),
+        cull_mask_x_lt = vectorBoolAnd(
+            cull_mask_x_lt,
+            out_triangle[vertex_index].x < -out_triangle[vertex_index].w,
         );
 
-        cull_mask_y = vectorBoolAnd(
-            cull_mask_y,
-            vectorBoolOr(
-                out_triangle[vertex_index].y < -out_triangle[vertex_index].w,
-                out_triangle[vertex_index].y > out_triangle[vertex_index].w,
-            ),
+        cull_mask_x_gt = vectorBoolAnd(
+            cull_mask_x_gt,
+            out_triangle[vertex_index].x > out_triangle[vertex_index].w,
         );
 
-        cull_mask_z = vectorBoolAnd(
-            cull_mask_z,
-            vectorBoolOr(
-                out_triangle[vertex_index].z < -out_triangle[vertex_index].w,
-                out_triangle[vertex_index].z > out_triangle[vertex_index].w,
-            ),
+        cull_mask_y_lt = vectorBoolAnd(
+            cull_mask_y_lt,
+            out_triangle[vertex_index].y < -out_triangle[vertex_index].w,
+        );
+
+        cull_mask_y_gt = vectorBoolAnd(
+            cull_mask_y_gt,
+            out_triangle[vertex_index].y > out_triangle[vertex_index].w,
+        );
+
+        cull_mask_z_lt = vectorBoolAnd(
+            cull_mask_z_lt,
+            out_triangle[vertex_index].z < -out_triangle[vertex_index].w,
+        );
+
+        cull_mask_z_gt = vectorBoolAnd(
+            cull_mask_z_gt,
+            out_triangle[vertex_index].z > out_triangle[vertex_index].w,
         );
     }
+
+    const cull_mask_x = vectorBoolXor(cull_mask_x_lt, cull_mask_x_gt);
+    const cull_mask_y = vectorBoolXor(cull_mask_y_lt, cull_mask_y_gt);
+    const cull_mask_z = vectorBoolXor(cull_mask_z_lt, cull_mask_z_gt);
 
     const cull_mask = vectorBoolOr(cull_mask_z, vectorBoolOr(cull_mask_x, cull_mask_y));
 
@@ -458,6 +473,8 @@ pub const RasterTileBuffer = struct {
     stream_triangles: std.ArrayListUnmanaged(Triangle) = .empty,
     stream_states: std.ArrayListUnmanaged(State) = .empty,
 
+    thread_pool: std.Thread.Pool,
+
     tile_data: []Tile,
 
     pub const Triangle = struct {
@@ -487,30 +504,68 @@ pub fn rasterizerFlushTiles(
     render_target: Image,
     tile_buffer: *RasterTileBuffer,
 ) void {
-    const tile_count_x = render_target.width / tile_width + @intFromBool(render_target.width % tile_width != 0);
-    const tile_count_y = render_target.height / tile_height + @intFromBool(render_target.height % tile_height != 0);
+    var wait_group: std.Thread.WaitGroup = .{};
 
-    var tile_y: isize = 0;
+    const thread_count = tile_buffer.thread_pool.getIdCount();
+    const tiles_per_thread = tile_buffer.tile_data.len / thread_count;
+    const tailing_tiles = @rem(tile_buffer.tile_data.len, thread_count);
 
-    while (tile_y < tile_count_y) : (tile_y += 1) {
-        var tile_x: isize = 0;
+    var tile_index_start: usize = 0;
 
-        while (tile_x < tile_count_x) : (tile_x += 1) {
-            //TODO: Do coarse rasterization
+    for (0..thread_count) |thread_index| {
+        var tile_count = tiles_per_thread;
+        defer tile_index_start += tile_count;
 
-            const tile_index: usize = @intCast(tile_x + tile_y * tile_count_x);
+        if (thread_index == thread_count - 1) {
+            //Do work
+            tile_count += tailing_tiles;
+        }
 
-            const tile = &tile_buffer.tile_data[tile_index];
+        const tile_index_end = tile_index_start + tile_count;
 
-            if (tile.triangle_count == 0) continue;
-
-            rasterizeTileTriangles(
-                tile_buffer,
-                tile,
-                tile_x,
-                tile_y,
+        if (thread_index == thread_count - 1) {
+            rasterizerFlushTileRange(render_target, tile_buffer, tile_index_start, tile_index_end);
+        } else {
+            tile_buffer.thread_pool.spawnWg(
+                &wait_group,
+                rasterizerFlushTileRange,
+                .{
+                    render_target,
+                    tile_buffer,
+                    tile_index_start,
+                    tile_index_end,
+                },
             );
         }
+    }
+
+    wait_group.wait();
+}
+
+pub fn rasterizerFlushTileRange(
+    render_target: Image,
+    tile_buffer: *RasterTileBuffer,
+    tile_index_start: usize,
+    tile_index_end: usize,
+) void {
+    const tile_count_x = render_target.width / tile_width + @intFromBool(render_target.width % tile_width != 0);
+    const tile_count_y = render_target.height / tile_height + @intFromBool(render_target.height % tile_height != 0);
+    _ = tile_count_y; // autofix
+
+    for (tile_index_start..tile_index_end) |tile_index| {
+        const tile_x = @rem(tile_index, tile_count_x);
+        const tile_y = tile_index / tile_count_x;
+
+        const tile = &tile_buffer.tile_data[tile_index];
+
+        if (tile.triangle_count == 0) continue;
+
+        rasterizeTileTriangles(
+            tile_buffer,
+            tile,
+            @intCast(tile_x),
+            @intCast(tile_y),
+        );
     }
 }
 
@@ -599,17 +654,11 @@ pub fn rasterizeSubmit(
     bounds_max_x = @min(bounds_max_x, @as(WarpRegister(f32), @floatFromInt(@as(WarpRegister(i32), @splat(raster_state.scissor_max_x)))));
     bounds_max_y = @min(bounds_max_y, @as(WarpRegister(f32), @floatFromInt(@as(WarpRegister(i32), @splat(raster_state.scissor_max_y)))));
 
-    var start_x: WarpRegister(i32) = @intFromFloat(@floor(bounds_min_x));
-    var start_y: WarpRegister(i32) = @intFromFloat(@floor(bounds_min_y));
+    const start_x: WarpRegister(i32) = @intFromFloat(@floor(bounds_min_x));
+    const start_y: WarpRegister(i32) = @intFromFloat(@floor(bounds_min_y));
 
-    start_x = @max(start_x, @as(WarpRegister(i32), @splat(raster_state.scissor_min_x)));
-    start_y = @max(start_y, @as(WarpRegister(i32), @splat(raster_state.scissor_min_y)));
-
-    var end_x: WarpRegister(i32) = @intFromFloat(@ceil(bounds_max_x));
-    var end_y: WarpRegister(i32) = @intFromFloat(@ceil(bounds_max_y));
-
-    end_x = @min(end_x, @as(WarpRegister(i32), @splat(raster_state.scissor_max_x)));
-    end_y = @min(end_y, @as(WarpRegister(i32), @splat(raster_state.scissor_max_y)));
+    const end_x: WarpRegister(i32) = @intFromFloat(@ceil(bounds_max_x));
+    const end_y: WarpRegister(i32) = @intFromFloat(@ceil(bounds_max_y));
 
     const triangle_matrix: Mat3x3 = .{
         .{ projected_triangle.points[0].x, projected_triangle.points[1].x, projected_triangle.points[2].x },
@@ -679,7 +728,7 @@ pub fn rasterizeSubmit(
                     tile.triangles[tile.triangle_count] = stream_triangle_index;
                     tile.triangle_count += 1;
 
-                    if (tile.triangle_count == tile.triangles.len) {
+                    if (tile.triangle_count >= tile.triangles.len) {
                         //TODO: flush the tile
                         rasterizeTileTriangles(
                             tile_buffer,
@@ -687,6 +736,7 @@ pub fn rasterizeSubmit(
                             tile_x,
                             tile_y,
                         );
+                        tile.triangle_count = 0;
                     }
                 }
             }
@@ -1090,6 +1140,31 @@ pub fn rasterizeTileTriangles(
                         color_result.w = @splat(1);
                     }
 
+                    const visualize_tile_usage = false;
+
+                    if (visualize_tile_usage) {
+                        const triangle_count: WarpRegister(f32) = @splat(@floatFromInt(tile.triangle_count));
+                        const triangle_max_count: WarpRegister(f32) = @splat(tile.triangles.len);
+
+                        const util_ratio = triangle_count / triangle_max_count;
+
+                        color_result.x *= util_ratio;
+                        color_result.y *= util_ratio;
+                        color_result.z *= util_ratio;
+
+                        if (tile.triangle_count >= tile.triangles.len / 2) {
+                            // color_result.y = @splat(0);
+                            // color_result.z = @splat(0);
+                        }
+
+                        if (tile.triangle_count <= 32) {
+                            // color_result.x = @splat(0);
+                            // color_result.z = @splat(0);
+                        }
+
+                        // color_result.w = @splat(1);
+                    }
+
                     if (visualize_wireframe) {
                         var is_on_edge: WarpRegister(bool) = @splat(false);
 
@@ -1107,7 +1182,7 @@ pub fn rasterizeTileTriangles(
                         color_result.z = @select(f32, is_on_edge, zero, color_result.z);
                         color_result.w = @select(f32, is_on_edge, one, color_result.w);
 
-                        execution_mask &= @intFromBool(is_on_edge);
+                        // execution_mask &= @intFromBool(is_on_edge);
                     }
 
                     // if (visualize_triangle_boxes) {
@@ -1861,6 +1936,14 @@ pub fn vectorBoolOr(a: WarpRegister(bool), b: WarpRegister(bool)) WarpRegister(b
     const a_int = @intFromBool(a);
     const b_int = @intFromBool(b);
     const anded = a_int | b_int;
+
+    return anded == @as(WarpRegister(u1), @splat(1));
+}
+
+pub fn vectorBoolXor(a: WarpRegister(bool), b: WarpRegister(bool)) WarpRegister(bool) {
+    const a_int = @intFromBool(a);
+    const b_int = @intFromBool(b);
+    const anded = a_int ^ b_int;
 
     return anded == @as(WarpRegister(u1), @splat(1));
 }
