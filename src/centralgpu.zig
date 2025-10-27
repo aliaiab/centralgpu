@@ -903,8 +903,8 @@ pub fn rasterizeTileTriangles(
                     execution_mask &= @intFromBool(bary_1 >= @as(WarpRegister(f32), @splat(0)));
                     execution_mask &= @intFromBool(bary_2 >= @as(WarpRegister(f32), @splat(0)));
 
-                    const visualize_triangle_boxes = false;
-                    const visualize_wireframe: bool = false;
+                    const visualize_triangle_boxes = true;
+                    const visualize_wireframe: bool = true;
 
                     if (@reduce(.Or, execution_mask) == 0 and !visualize_triangle_boxes) {
                         continue;
@@ -1428,7 +1428,7 @@ pub inline fn maskedGather(
 
     switch (@import("builtin").cpu.arch) {
         .x86_64 => {
-            if (@import("builtin").zig_backend == .stage2_x86_64) {
+            if (true or @import("builtin").zig_backend == .stage2_x86_64) {
                 var result: @Vector(8, T) = undefined;
 
                 inline for (0..8) |i| {
