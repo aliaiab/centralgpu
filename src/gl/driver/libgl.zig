@@ -14,8 +14,11 @@ const WaylandContext = struct {
 // const target_width = 1280;
 // const target_height = 720;
 
-const target_width = 720;
+const target_width = 640;
 const target_height = 480;
+
+const surface_width: usize = @intCast(target_width * 2);
+const surface_height: usize = @intCast(target_height * 2);
 
 export fn glGetString(name: i32) callconv(.c) [*:0]const u8 {
     const gpa = std.heap.smp_allocator;
@@ -99,7 +102,7 @@ pub export fn SDL_GL_GetProcAddress(
         .{ "glClientActiveTextureARB", &centralgpu_gl.glActiveTexture },
     });
 
-    std.debug.print("(centralgl) TRYING TO LOAD: {s}\n", .{proc_name});
+    std.log.info("(centralgl) TRYING TO LOAD: {s}\n", .{proc_name});
 
     if (proc_map.get(std.mem.span(proc_name))) |proc| {
         return proc;
@@ -119,9 +122,6 @@ var wayland_state: struct {
 } = undefined;
 
 fn glFlushCallback() void {
-    const surface_width: usize = @intCast(target_width);
-    const surface_height: usize = @intCast(target_height);
-
     const pixel_ptr: [*]centralgpu.XRgb888 = @ptrCast(@alignCast(wayland_state.out_pixel_buffer.ptr));
 
     const time_start_ns = std.time.nanoTimestamp();
@@ -130,16 +130,14 @@ fn glFlushCallback() void {
         centralgpu_gl.current_context.?.bound_render_target.pixel_ptr,
         pixel_ptr,
         centralgpu_gl.current_context.?.bound_render_target.width,
-        // 1280,
-        // 720,
-        720,
-        480,
+        target_width,
+        target_height,
         surface_width,
         surface_height,
     );
 
     {
-        std.debug.print("blitRaster_time: {}ns\n", .{std.time.nanoTimestamp() - time_start_ns});
+        std.log.info("blitRaster_time: {}ns\n", .{std.time.nanoTimestamp() - time_start_ns});
     }
 
     if (wayland_state.display.roundtrip() != .SUCCESS) @panic("");
@@ -183,8 +181,8 @@ fn initWayland() !void {
     xdg_surface.setListener(*wl.Surface, xdgSurfaceListener, surface);
     xdg_toplevel.setListener(*bool, xdgToplevelListener, &wayland_state.running);
 
-    const width = target_width;
-    const height = target_height;
+    const width = surface_width;
+    const height = surface_height;
     const stride = width * 4;
     const size = stride * height;
 
@@ -267,6 +265,10 @@ pub fn panic(msg: []const u8, stack_trace: ?*const std.builtin.StackTrace, ra: ?
 
     std.posix.abort();
 }
+
+pub const std_options: std.Options = .{
+    .log_level = .err,
+};
 
 comptime {
     _ = centralgpu_gl;

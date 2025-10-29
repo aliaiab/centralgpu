@@ -1,5 +1,3 @@
-const std = @import("std");
-
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -7,7 +5,6 @@ pub fn build(b: *std.Build) void {
     const sdl_dep = b.dependency("sdl", .{
         .target = target,
         .optimize = optimize,
-        .preferred_link_mode = .static, // or .dynamic
     });
     const sdl_lib = sdl_dep.artifact("SDL3");
 
@@ -114,6 +111,8 @@ pub fn build(b: *std.Build) void {
             },
         });
 
+        libgl_lib.use_llvm = true;
+
         b.installArtifact(libgl_lib);
     }
 
@@ -147,3 +146,5 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_exe_unit_tests.step);
 }
+
+const std = @import("std");
