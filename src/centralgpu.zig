@@ -42,10 +42,6 @@ pub const Image = struct {
     pixel_ptr: [*]Rgba32,
     width: u32,
     height: u32,
-
-    pub fn pixels(image: Image) []Rgba32 {
-        return image.pixel_ptr[0 .. image.width * image.height];
-    }
 };
 
 ///A Combined Image/Sampler that points to multiple image mip lod levels
@@ -53,20 +49,37 @@ pub const ImageDescriptor = packed struct(u64) {
     rel_ptr: i32,
     width_log2: u4,
     height_log2: u4,
-    max_mip_level: u8 = 0,
-    sampler_filter: enum(u1) {
+    max_mip_level: u4,
+    sampler_filter: SamplerFilter,
+    sampler_address_mode: SamplerAddressMode,
+    border_colour: BorderColour,
+    _: u14 = 0,
+
+    pub const SamplerFilter = enum(u1) {
         nearest,
         bilinear,
-    },
-    sampler_address_mode: enum(u2) {
+    };
+
+    pub const SamplerAddressMode = enum(u2) {
         repeat,
         clamp_to_edge,
         clamp_to_border,
-    },
-    ///Specifies how the border colour should be shifted
+    };
+
     ///border_colour = 0xff_ff_ff_ff << (border_colour_shift_amount << 3)
-    border_colour_shift_amount: u3,
-    _: u10 = 0,
+    pub const BorderColour = enum(u3) {
+        //0xff_ff_ff_ff
+        white = 0,
+        //0xff_ff_ff_00
+        aqua = 1,
+        //0xff_ff_00_00
+        blue = 2,
+        //0xff_00_00_00
+        black_opaque = 3,
+        //0x00_00_00_00
+        black_transparent = 4,
+        _,
+    };
 };
 
 const warp_register_len = std.simd.suggestVectorLength(u32).?;
@@ -1336,7 +1349,7 @@ pub inline fn maskedLoad(
 
     switch (@import("builtin").cpu.arch) {
         .x86_64 => {
-            if (true or @import("builtin").zig_backend == .stage2_x86_64) {
+            if (@import("builtin").zig_backend == .stage2_x86_64) {
                 var result: @Vector(8, T) = undefined;
 
                 inline for (0..8) |i| {
@@ -1386,7 +1399,7 @@ pub inline fn maskedStore(
 
     switch (@import("builtin").cpu.arch) {
         .x86_64 => {
-            if (true or @import("builtin").zig_backend == .stage2_x86_64) {
+            if (@import("builtin").zig_backend == .stage2_x86_64) {
                 inline for (0..8) |i| {
                     if (predicate[i]) {
                         dest[i] = values[i];
@@ -1427,7 +1440,7 @@ pub inline fn maskedGather(
 
     switch (@import("builtin").cpu.arch) {
         .x86_64 => {
-            if (true or @import("builtin").zig_backend == .stage2_x86_64) {
+            if (@import("builtin").zig_backend == .stage2_x86_64) {
                 var result: @Vector(8, T) = undefined;
 
                 inline for (0..8) |i| {
@@ -1777,7 +1790,9 @@ pub inline fn imageLoad(
     //3: ...
     //4: transparent black
 
-    const border_colour: WarpRegister(u32) = @splat(@truncate(@as(usize, 0xff_ff_ff_ff) << (@as(u6, descriptor.border_colour_shift_amount) << 3)));
+    const border_colour_shift_amount: u6 = @intFromEnum(descriptor.border_colour);
+
+    const border_colour: WarpRegister(u32) = @splat(@truncate(@as(usize, 0xff_ff_ff_ff) << (@as(u6, border_colour_shift_amount) << 3)));
 
     var actual_mask = execution_mask;
 
