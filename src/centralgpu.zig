@@ -1567,11 +1567,11 @@ pub inline fn imageSampleDerivative(
     const texture_width: WarpRegister(f32) = @splat(@floatFromInt(@as(u32, 1) << @as(u5, descriptor.width_log2)));
     const texture_height: WarpRegister(f32) = @splat(@floatFromInt(@as(u32, 1) << @as(u5, descriptor.height_log2)));
 
-    const scaled_dv_dx = v_derivative.x * texture_width;
-    const scaled_dv_dy = v_derivative.y * texture_height;
-
     const scaled_du_dx = u_derivative.x * texture_width;
-    const scaled_du_dy = u_derivative.y * texture_height;
+    const scaled_du_dy = u_derivative.y * texture_width;
+
+    const scaled_dv_dx = v_derivative.x * texture_height;
+    const scaled_dv_dy = v_derivative.y * texture_height;
 
     const length_x = scaled_du_dx * scaled_du_dx + scaled_dv_dx * scaled_dv_dx;
     const length_y = scaled_du_dy * scaled_du_dy + scaled_dv_dy * scaled_dv_dy;
@@ -2218,10 +2218,6 @@ pub fn homogenousProject(v: Homogenous2D) WarpVec2(f32) {
 }
 
 fn fastApproxLog2(z: WarpRegister(f32)) WarpRegister(f32) {
-    if (false) {
-        return @log2(z);
-    }
-
     const z_as_int: WarpRegister(u32) = @bitCast(@abs(z));
     const z_exponent_bits = z_as_int >> @as(WarpRegister(f32), @splat(23));
     const z_mantissa = (z_as_int << @as(WarpRegister(f32), @splat(9))) >> @as(WarpRegister(f32), @splat(9));

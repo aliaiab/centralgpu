@@ -430,9 +430,6 @@ pub export fn glTexSubImage2D(
             const src_x: usize = x - start_x;
             const src_y: usize = y - start_y;
 
-            const actual_y: usize = (@as(usize, @intCast(texture.height - 1)) - y);
-            _ = actual_y; // autofix
-            // const src_index = @as(usize, @intCast(src_y)) * @as(usize, @intCast(width)) + src_x;
             const src_index = @as(usize, @intCast(src_y)) * row_width + src_x;
             const index = centralgpu.mortonEncode(@splat(@intCast(x)), @splat(@intCast(y)))[0];
 
@@ -697,6 +694,8 @@ pub export fn glTexImage2D(
         return;
     }
 
+    const texture = &context.textures.items[context.texture_units[context.texture_unit_active] - 1];
+
     if (level != 0) {
         glTexSubImage2D(
             target,
@@ -711,8 +710,6 @@ pub export fn glTexImage2D(
         );
         return;
     }
-
-    const texture = &context.textures.items[context.texture_units[context.texture_unit_active] - 1];
 
     texture.internal_format = internal_format;
     texture.width = @intCast(width);
