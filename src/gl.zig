@@ -246,7 +246,7 @@ pub export fn glDepthFunc(
             context.invert_depth_test = true;
         },
         else => {
-            std.debug.print("glDepthFunc: func: 0x{x}\n", .{func});
+            std.log.info("glDepthFunc: func: 0x{x}\n", .{func});
             @panic("GL_DEPTH_FUNC");
         },
     }
@@ -273,7 +273,7 @@ pub export fn glStencilFunc(
     switch (func) {
         GL_EQUAL => {},
         else => {
-            std.debug.print("func: {}\n", .{func});
+            std.log.info("func: {}\n", .{func});
             @panic("glStencilFunc");
         },
     }
@@ -284,12 +284,12 @@ pub export fn glStencilOp(
     dpfail: i32,
     dppass: i32,
 ) void {
-    std.debug.print("sfail = 0x{x}, dpfail = 0x{x}, dppass = 0x{x}\n", .{ sfail, dpfail, dppass });
+    std.log.info("sfail = 0x{x}, dpfail = 0x{x}, dppass = 0x{x}\n", .{ sfail, dpfail, dppass });
 
     switch (sfail) {
         GL_KEEP => {},
         else => {
-            std.debug.print("op = 0x{x}\n", .{sfail});
+            std.log.info("op = 0x{x}\n", .{sfail});
 
             @panic("glStencilOp");
         },
@@ -363,6 +363,28 @@ fn readSrcPixel(
     }
 }
 
+fn computeMipCountAndTotalSize(width: usize, height: usize) struct { usize, usize } {
+    var count: usize = 1;
+    var total_size: usize = width * height;
+
+    var current_width: usize = width;
+    var current_height: usize = height;
+
+    while (true) {
+        current_width /= 2;
+        current_height /= 2;
+
+        if (current_width == 0 or current_height == 0) {
+            break;
+        }
+
+        count += 1;
+        total_size += current_width * current_height;
+    }
+
+    return .{ count, total_size };
+}
+
 pub export fn glTexSubImage2D(
     target: i32,
     level: i32,
@@ -382,15 +404,11 @@ pub export fn glTexSubImage2D(
         @panic("only GL_TEXTURE_2D is supported");
     }
 
-    if (level != 0) {
-        return;
-    }
-
     const texture = &context.textures.items[context.texture_units[context.texture_unit_active] - 1];
 
-    const component_count: usize = internalFormatComponentCount(texture.internal_format);
+    texture.descriptor.max_mip_level = @max(texture.descriptor.max_mip_level, @as(u8, @intCast(level)));
 
-    const dest_data_ptr: [*]centralgpu.Rgba32 = texture.texture_data.ptr;
+    const component_count: usize = internalFormatComponentCount(texture.internal_format);
 
     const start_x: usize = @intCast(x_offset);
     const start_y: usize = @intCast(y_offset);
@@ -398,6 +416,9 @@ pub export fn glTexSubImage2D(
     const end_y: usize = @intCast(y_offset + height);
 
     const row_width: usize = if (context.pixel_store.unpack_row_length == 0) @intCast(width) else context.pixel_store.unpack_row_length;
+
+    const mip_base: u32 = centralgpu.imageMipBaseAddress(texture.descriptor, @splat(@intCast(level)))[0];
+    const dest_data_ptr: [*]centralgpu.Rgba32 = texture.texture_data.ptr + mip_base;
 
     var y: usize = start_y;
 
@@ -643,7 +664,7 @@ pub export fn glPixelStorei(
     pname: i32,
     param: i32,
 ) callconv(.c) void {
-    std.debug.print("glPixelStorei: 0x{x}, 0x{x}\n", .{ pname, param });
+    std.log.info("glPixelStorei: 0x{x}, 0x{x}\n", .{ pname, param });
     const context = current_context.?;
 
     switch (pname) {
@@ -672,6 +693,7 @@ pub export fn glTexImage2D(
     }
 
     if (level != 0) {
+        glTexSubImage2D(target, level, 0, 0, width, height, format, _type, data.?);
         return;
     }
 
@@ -699,13 +721,19 @@ pub export fn glTexImage2D(
     const padded_width = centralgpu.computeTargetPaddedSize(@intCast(width));
     const padded_height = centralgpu.computeTargetPaddedSize(@intCast(height));
 
-    const dest_data_size: usize = @intCast(padded_width * padded_height * @sizeOf(u32));
+    const mip_count, const total_data_size = computeMipCountAndTotalSize(padded_width, padded_height);
+    _ = mip_count; // autofix
+
+    const dest_data_size: usize = @intCast(total_data_size * @sizeOf(u32));
 
     const image_data = std.heap.page_allocator.alloc(centralgpu.Rgba32, dest_data_size) catch @panic("");
+
+    @memset(image_data, .{ .r = 255, .b = 0, .g = 0, .a = 255 });
 
     texture.texture_data = image_data;
     texture.descriptor = .{
         .rel_ptr = 0,
+        .max_mip_level = 0,
         .width_log2 = @intCast(std.math.log2_int(usize, @intCast(width))),
         .height_log2 = @intCast(std.math.log2_int(usize, @intCast(height))),
         .sampler_filter = .bilinear,
@@ -852,7 +880,7 @@ pub export fn glTexEnvf(
                 GL_ADD => .add,
                 GL_DECAL => .decal,
                 else => {
-                    std.debug.print("texture env func: 0x{x}\n", .{@as(i32, @intFromFloat(param))});
+                    std.log.info("texture env func: 0x{x}\n", .{@as(i32, @intFromFloat(param))});
                     @panic("texture env function not supported");
                     // return;
                 },
@@ -865,7 +893,7 @@ pub export fn glTexEnvf(
             context.texture_rgb_scale = param;
         },
         else => {
-            std.debug.print("0x{x}\n", .{pname});
+            std.log.info("0x{x}\n", .{pname});
             @panic("Unsupported pname");
         },
     }
@@ -1783,14 +1811,14 @@ pub export fn glFlush() callconv(.c) void {
         context.should_clear_depth_attachment = false;
     }
 
-    std.debug.print("total draw_cmds: {}\n", .{context.draw_commands.items.len});
-    std.debug.print("total triangle: {}\n", .{context.triangle_count});
-    // std.debug.print("flush primitives time: {}ns\n", .{context.profile_data.flush_primitives_time});
+    std.log.info("total draw_cmds: {}\n", .{context.draw_commands.items.len});
+    std.log.info("total triangle: {}\n", .{context.triangle_count});
+    // std.log.info("flush primitives time: {}ns\n", .{context.profile_data.flush_primitives_time});
 
     const time_begin = std.time.nanoTimestamp();
     defer {
         const time_ns = std.time.nanoTimestamp() - time_begin;
-        std.debug.print("glFlush: time_taken: {}ns\n", .{time_ns});
+        std.log.info("glFlush: time_taken: {}ns\n", .{time_ns});
     }
 
     {
@@ -1922,7 +1950,7 @@ pub export fn glFlush() callconv(.c) void {
     }
 
     {
-        std.debug.print("rasterizer_submit_time: {}ns\n", .{std.time.nanoTimestamp() - rasterizer_submit_time});
+        std.log.info("rasterizer_submit_time: {}ns\n", .{std.time.nanoTimestamp() - rasterizer_submit_time});
     }
 
     const rasterizer_flush_time = std.time.nanoTimestamp();
@@ -1930,7 +1958,7 @@ pub export fn glFlush() callconv(.c) void {
     centralgpu.rasterizerFlushTiles(context.bound_render_target, &context.raster_tile_buffer);
 
     {
-        std.debug.print("rasterizer_flush_time: {}ns\n", .{std.time.nanoTimestamp() - rasterizer_flush_time});
+        std.log.info("rasterizer_flush_time: {}ns\n", .{std.time.nanoTimestamp() - rasterizer_flush_time});
     }
 
     context.raster_tile_buffer.stream_states.clearRetainingCapacity();
