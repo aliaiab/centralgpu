@@ -54,10 +54,11 @@ pub const Context = struct {
     default_texture_descriptor: centralgpu.ImageDescriptor = .{
         .width_log2 = 0,
         .height_log2 = 0,
+        .max_mip_level = 0,
         .sampler_filter = .bilinear,
         .sampler_address_mode = .repeat,
         .rel_ptr = -1,
-        .border_colour_shift_amount = 0,
+        .border_colour = .white,
     },
     textures: std.ArrayListUnmanaged(struct {
         texture_data: []centralgpu.Rgba32 = &.{},
@@ -406,7 +407,7 @@ pub export fn glTexSubImage2D(
 
     const texture = &context.textures.items[context.texture_units[context.texture_unit_active] - 1];
 
-    texture.descriptor.max_mip_level = @max(texture.descriptor.max_mip_level, @as(u8, @intCast(level)));
+    texture.descriptor.max_mip_level = @max(texture.descriptor.max_mip_level, @as(u4, @intCast(level)));
 
     const component_count: usize = internalFormatComponentCount(texture.internal_format);
 
@@ -692,12 +693,22 @@ pub export fn glTexImage2D(
         @panic("only GL_TEXTURE_2D is supported");
     }
 
-    if (level != 0) {
-        glTexSubImage2D(target, level, 0, 0, width, height, format, _type, data.?);
+    if (context.texture_units[context.texture_unit_active] == 0) {
         return;
     }
 
-    if (context.texture_units[context.texture_unit_active] == 0) {
+    if (level != 0) {
+        glTexSubImage2D(
+            target,
+            level,
+            0,
+            0,
+            width,
+            height,
+            format,
+            _type,
+            data.?,
+        );
         return;
     }
 
@@ -728,8 +739,6 @@ pub export fn glTexImage2D(
 
     const image_data = std.heap.page_allocator.alloc(centralgpu.Rgba32, dest_data_size) catch @panic("");
 
-    @memset(image_data, .{ .r = 255, .b = 0, .g = 0, .a = 255 });
-
     texture.texture_data = image_data;
     texture.descriptor = .{
         .rel_ptr = 0,
@@ -738,11 +747,21 @@ pub export fn glTexImage2D(
         .height_log2 = @intCast(std.math.log2_int(usize, @intCast(height))),
         .sampler_filter = .bilinear,
         .sampler_address_mode = .repeat,
-        .border_colour_shift_amount = 4,
+        .border_colour = .black_transparent,
     };
 
     if (data != null) {
-        glTexSubImage2D(target, level, 0, 0, width, height, format, _type, data.?);
+        glTexSubImage2D(
+            target,
+            level,
+            0,
+            0,
+            width,
+            height,
+            format,
+            _type,
+            data.?,
+        );
     } else {
         @memset(image_data, .{ .r = 0, .g = 0, .b = 0, .a = 0 });
     }
@@ -917,7 +936,7 @@ pub export fn glTexParameteri(
     }
 
     switch (pname) {
-        GL_TEXTURE_MIN_FILTER,
+        // GL_TEXTURE_MIN_FILTER,
         GL_TEXTURE_MAG_FILTER,
         => {
             switch (param) {
