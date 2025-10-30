@@ -385,44 +385,21 @@ pub fn processGeometry(
 
         out_triangle[vertex_index] = transformed_vertex;
 
-        cull_mask_x_lt = vectorBoolAnd(
-            cull_mask_x_lt,
-            out_triangle[vertex_index].x < -out_triangle[vertex_index].w,
-        );
-
-        cull_mask_x_gt = vectorBoolAnd(
-            cull_mask_x_gt,
-            out_triangle[vertex_index].x > out_triangle[vertex_index].w,
-        );
-
-        cull_mask_y_lt = vectorBoolAnd(
-            cull_mask_y_lt,
-            out_triangle[vertex_index].y < -out_triangle[vertex_index].w,
-        );
-
-        cull_mask_y_gt = vectorBoolAnd(
-            cull_mask_y_gt,
-            out_triangle[vertex_index].y > out_triangle[vertex_index].w,
-        );
-
-        cull_mask_z_lt = vectorBoolAnd(
-            cull_mask_z_lt,
-            out_triangle[vertex_index].z < -out_triangle[vertex_index].w,
-        );
-
-        cull_mask_z_gt = vectorBoolAnd(
-            cull_mask_z_gt,
-            out_triangle[vertex_index].z > out_triangle[vertex_index].w,
-        );
+        cull_mask_x_lt &= out_triangle[vertex_index].x < -out_triangle[vertex_index].w;
+        cull_mask_x_gt &= out_triangle[vertex_index].x > out_triangle[vertex_index].w;
+        cull_mask_y_lt &= out_triangle[vertex_index].y < -out_triangle[vertex_index].w;
+        cull_mask_y_gt &= out_triangle[vertex_index].y > out_triangle[vertex_index].w;
+        cull_mask_z_lt &= out_triangle[vertex_index].z < -out_triangle[vertex_index].w;
+        cull_mask_z_gt &= out_triangle[vertex_index].z > out_triangle[vertex_index].w;
     }
 
-    const cull_mask_x = vectorBoolXor(cull_mask_x_lt, cull_mask_x_gt);
-    const cull_mask_y = vectorBoolXor(cull_mask_y_lt, cull_mask_y_gt);
-    const cull_mask_z = vectorBoolXor(cull_mask_z_lt, cull_mask_z_gt);
+    const cull_mask_x = cull_mask_x_lt ^ cull_mask_x_gt;
+    const cull_mask_y = cull_mask_y_lt ^ cull_mask_y_gt;
+    const cull_mask_z = cull_mask_z_lt ^ cull_mask_z_gt;
 
-    const cull_mask = vectorBoolOr(cull_mask_z, vectorBoolOr(cull_mask_x, cull_mask_y));
+    const cull_mask = cull_mask_z | cull_mask_x | cull_mask_y;
 
-    out_mask = vectorBoolAnd(out_mask, vectorBoolNot(cull_mask));
+    out_mask = out_mask & ~cull_mask;
 
     return .{
         .mask = out_mask,
@@ -629,7 +606,7 @@ pub fn rasterizeSubmit(
         bounds_min = homogenousProject(homogenousMin(p0_min, homogenousMin(p1_min, p2_min)));
         bounds_max = homogenousProject(homogenousMax(p0_max, homogenousMax(p1_max, p2_max)));
 
-        const any_are_neg = vectorBoolOr(vectorBoolOr(p0.w <= zero, p1.w <= zero), p2.w <= zero);
+        const any_are_neg = (p0.w <= zero) | (p1.w <= zero) | (p2.w <= zero);
 
         bounds_min.x = @select(f32, any_are_neg, -inf, bounds_min.x);
         bounds_min.y = @select(f32, any_are_neg, -inf, bounds_min.y);
@@ -683,7 +660,7 @@ pub fn rasterizeSubmit(
     const matrix_inv = mat3x3InvDet(triangle_matrix, matrix_det_recip);
 
     //Backface cull
-    projected_triangle.mask = vectorBoolAnd(projected_triangle.mask, matrix_det <= @as(WarpRegister(f32), @splat(0)));
+    projected_triangle.mask &= matrix_det <= @as(WarpRegister(f32), @splat(0));
 
     const mask_integer: u8 = @bitCast(projected_triangle.mask);
 
@@ -846,7 +823,7 @@ pub fn rasterizeTileTriangles(
 
                 for (0..2) |half_y_offset| {
                     const y_offset: isize = @intCast(half_y_offset * 2);
-                    var execution_mask: WarpRegister(u32) = @splat(1);
+                    var execution_mask: WarpRegister(bool) = @splat(true);
 
                     const target_start_ptr = block_start_ptr + @as(usize, @intCast(y_offset * block_width));
                     const target_depth = raster_state.depth_image + block_offset + @as(usize, @intCast(y_offset * block_width));
@@ -875,13 +852,13 @@ pub fn rasterizeTileTriangles(
 
                     var scissor_test: WarpRegister(bool) = @splat(true);
 
-                    scissor_test = vectorBoolAnd(scissor_test, point_x_int >= @as(WarpRegister(i32), @splat(raster_state.scissor_min_x)));
-                    scissor_test = vectorBoolAnd(scissor_test, point_y_int >= @as(WarpRegister(i32), @splat(raster_state.scissor_min_y)));
+                    scissor_test &= point_x_int >= @as(WarpRegister(i32), @splat(raster_state.scissor_min_x));
+                    scissor_test &= point_y_int >= @as(WarpRegister(i32), @splat(raster_state.scissor_min_y));
 
-                    scissor_test = vectorBoolAnd(scissor_test, point_x_int < @as(WarpRegister(i32), @splat(raster_state.scissor_max_x)));
-                    scissor_test = vectorBoolAnd(scissor_test, point_y_int < @as(WarpRegister(i32), @splat(raster_state.scissor_max_y)));
+                    scissor_test &= point_x_int < @as(WarpRegister(i32), @splat(raster_state.scissor_max_x));
+                    scissor_test &= point_y_int < @as(WarpRegister(i32), @splat(raster_state.scissor_max_y));
 
-                    execution_mask &= @intFromBool(scissor_test);
+                    execution_mask &= scissor_test;
 
                     var point_x: WarpRegister(f32) = @floatFromInt(point_x_int);
                     var point_y: WarpRegister(f32) = @floatFromInt(point_y_int);
@@ -911,14 +888,14 @@ pub fn rasterizeTileTriangles(
                     bary_1 = barycentrics.y;
                     bary_2 = barycentrics.z;
 
-                    execution_mask &= @intFromBool(bary_0 >= @as(WarpRegister(f32), @splat(0)));
-                    execution_mask &= @intFromBool(bary_1 >= @as(WarpRegister(f32), @splat(0)));
-                    execution_mask &= @intFromBool(bary_2 >= @as(WarpRegister(f32), @splat(0)));
+                    execution_mask &= bary_0 >= @as(WarpRegister(f32), @splat(0));
+                    execution_mask &= bary_1 >= @as(WarpRegister(f32), @splat(0));
+                    execution_mask &= bary_2 >= @as(WarpRegister(f32), @splat(0));
 
                     const visualize_triangle_boxes = true;
                     const visualize_wireframe: bool = false;
 
-                    if (@reduce(.Or, execution_mask) == 0 and !visualize_triangle_boxes) {
+                    if (@reduce(.Or, execution_mask) == false and !visualize_triangle_boxes) {
                         continue;
                     }
 
@@ -954,7 +931,7 @@ pub fn rasterizeTileTriangles(
                     if (raster_state.flags.enable_depth_test or raster_state.flags.enable_stencil_test) {
                         const previous_depth_packed = maskedLoad(
                             u32,
-                            execution_mask != @as(WarpRegister(u1), @splat(0)),
+                            execution_mask,
                             @ptrCast(target_depth),
                         );
 
@@ -973,7 +950,7 @@ pub fn rasterizeTileTriangles(
                         }
 
                         if (visualize_depth == false) {
-                            execution_mask &= @intFromBool(pass_depth);
+                            execution_mask &= pass_depth;
                         }
 
                         if (raster_state.flags.enable_stencil_test) {
@@ -982,11 +959,11 @@ pub fn rasterizeTileTriangles(
 
                             pass_stencil = new_stencil == stencil_comparator;
 
-                            execution_mask &= @intFromBool(pass_stencil);
+                            execution_mask &= pass_stencil;
                         }
                     }
 
-                    if (@reduce(.Or, execution_mask) == 0 and !visualize_triangle_boxes) {
+                    if (@reduce(.Or, execution_mask) == false and !visualize_triangle_boxes) {
                         continue;
                     }
 
@@ -1044,7 +1021,7 @@ pub fn rasterizeTileTriangles(
                             const texture_environment = uniforms.texture_environments[texture_unit];
 
                             var texture_sample = quadImageSample(
-                                execution_mask != @as(WarpRegister(u1), @splat(0)),
+                                execution_mask,
                                 @ptrCast(@alignCast(image_base)),
                                 image_descriptor,
                                 .{ .x = tex_u, .y = tex_v },
@@ -1091,13 +1068,13 @@ pub fn rasterizeTileTriangles(
 
                     if (raster_state.flags.enable_alpha_test) {
                         //alpha test
-                        execution_mask &= (@intFromBool(color_result.w > @as(WarpRegister(f32), @splat(0.01))));
+                        execution_mask &= color_result.w > @as(WarpRegister(f32), @splat(0.01));
                     }
 
                     if (raster_state.flags.enable_blend) {
                         const previous_colour_packed = maskedLoad(
                             u32,
-                            execution_mask != @as(WarpRegister(u1), @splat(0)),
+                            execution_mask,
                             @ptrCast(@alignCast(target_start_ptr)),
                         );
 
@@ -1182,9 +1159,9 @@ pub fn rasterizeTileTriangles(
 
                         const threshold: WarpRegister(f32) = @splat(0.01);
 
-                        is_on_edge = vectorBoolOr(is_on_edge, bary_0 <= threshold);
-                        is_on_edge = vectorBoolOr(is_on_edge, bary_1 <= threshold);
-                        is_on_edge = vectorBoolOr(is_on_edge, bary_2 <= threshold);
+                        is_on_edge |= bary_0 <= threshold;
+                        is_on_edge |= bary_1 <= threshold;
+                        is_on_edge |= bary_2 <= threshold;
 
                         const one: WarpRegister(f32) = @splat(1);
                         const zero: WarpRegister(f32) = @splat(0);
@@ -1199,7 +1176,7 @@ pub fn rasterizeTileTriangles(
 
                     maskedStore(
                         u32,
-                        execution_mask != @as(WarpRegister(u1), @splat(0)),
+                        execution_mask,
                         @ptrCast(@alignCast(target_start_ptr)),
                         packed_color,
                     );
@@ -1208,7 +1185,7 @@ pub fn rasterizeTileTriangles(
                         var stencil = @select(u8, pass_stencil, previous_stencil, new_stencil);
                         stencil = @select(
                             u8,
-                            vectorBoolAnd(pass_stencil, pass_depth),
+                            pass_stencil & pass_depth,
                             //Increment the stencil
                             previous_stencil +% @as(WarpRegister(u8), @splat(1)),
                             stencil,
@@ -1218,7 +1195,7 @@ pub fn rasterizeTileTriangles(
 
                         maskedStore(
                             u32,
-                            execution_mask != @as(WarpRegister(u1), @splat(0)),
+                            execution_mask,
                             @ptrCast(@alignCast(target_depth)),
                             depth_stencil,
                         );
@@ -1926,28 +1903,34 @@ pub inline fn imageAddress(
     return base_address + pixel_address;
 }
 
+///This is a floating point approximation of the exact formula for computing the start of a mip level
+///From limited testing it seems this breaks down very slightly (with small errors) in textures
+///whose width or height exceed around 2^12 (4096)
+//TODO: consider an alternative mip chain layout which trades more memory usage for accuracy in large textures
 pub inline fn imageMipBaseAddress(
     descriptor: ImageDescriptor,
     level: WarpRegister(u32),
 ) WarpRegister(u32) {
-    const width_log2: WarpRegister(u32) = @splat(descriptor.width_log2);
-    const height_log2: WarpRegister(u32) = @splat(descriptor.height_log2);
+    //This is width * height which is equal to 2^width_log2 * 2^height_log2 = 2^(width_log2 + height_log2)
+    const width_height_exponent: WarpRegister(u32) = @splat(@as(u32, descriptor.width_log2) + @as(u32, descriptor.height_log2));
+    const width_height = exp2IntX(width_height_exponent);
 
-    const width = @as(WarpRegister(u32), @splat(1)) << @as(WarpRegister(u5), @truncate(width_log2));
-    const height = @as(WarpRegister(u32), @splat(1)) << @as(WarpRegister(u5), @truncate(height_log2));
+    var four_to_level_int_exponent: WarpRegister(u32) = level;
+    //Multiply by 2, so that we exponentiate with base 4
+    four_to_level_int_exponent <<= @splat(1);
 
-    const width_height: WarpRegister(f32) = @floatFromInt(width * height);
-
-    const four_to_level_int = @as(WarpRegister(u32), @splat(1)) << @as(WarpRegister(u5), @truncate((level * @as(WarpRegister(u32), @splat(2)))));
-
-    const four_to_level: WarpRegister(f32) = @floatFromInt(four_to_level_int);
+    const four_to_level = exp2IntX(four_to_level_int_exponent);
 
     const recprocal_four_to_level = reciprocal(four_to_level);
 
     var base_approx: WarpRegister(f32) = @splat(0);
 
-    base_approx = @as(WarpRegister(f32), @splat(1)) - recprocal_four_to_level;
-    base_approx *= @splat(@as(comptime_float, 4) / @as(comptime_float, 3));
+    base_approx = @mulAdd(
+        WarpRegister(f32),
+        recprocal_four_to_level,
+        @splat(-4.0 / 3.0),
+        @splat(4.0 / 3.0),
+    );
     base_approx *= width_height;
 
     const base: WarpRegister(u32) = @intFromFloat(@ceil(base_approx));
@@ -1955,17 +1938,17 @@ pub inline fn imageMipBaseAddress(
     return base;
 }
 
-comptime {
-    //Testing for the above function
-    var test_desc: ImageDescriptor = undefined;
+///Computes 2^x where x is an integer, returning a float 32 vector
+///x must fit within 7 bits technically
+pub inline fn exp2IntX(
+    x: WarpRegister(u32),
+) WarpRegister(f32) {
+    var exponent_bits = x;
+    //Convert to a float as above
+    exponent_bits += @splat(127);
+    exponent_bits <<= @splat(23);
 
-    test_desc.width_log2 = @intCast(std.math.log2_int(u32, 512));
-    test_desc.height_log2 = @intCast(std.math.log2_int(u32, 256));
-
-    const base_address = imageMipBaseAddress(test_desc, @splat(2));
-    _ = base_address; // autofix
-
-    // @compileLog(base_address[0]);
+    return @bitCast(exponent_bits);
 }
 
 pub inline fn mortonEncode(x: WarpRegister(u32), y: WarpRegister(u32)) WarpRegister(u32) {
@@ -2010,36 +1993,6 @@ pub inline fn mortonPart1by1Scalar(x_in: usize) usize {
     x = (x ^ (x << 2)) & 0x33333333; // x = --fe --dc --ba --98 --76 --54 --32 --10
     x = (x ^ (x << 1)) & 0x55555555; // x = -f-e -d-c -b-a -9-8 -7-6 -5-4 -3-2 -1-0
     return x;
-}
-
-pub fn vectorBoolAnd(a: WarpRegister(bool), b: WarpRegister(bool)) WarpRegister(bool) {
-    const a_int = @intFromBool(a);
-    const b_int = @intFromBool(b);
-    const result = a_int & b_int;
-
-    return result == @as(WarpRegister(u1), @splat(1));
-}
-
-pub fn vectorBoolOr(a: WarpRegister(bool), b: WarpRegister(bool)) WarpRegister(bool) {
-    const a_int = @intFromBool(a);
-    const b_int = @intFromBool(b);
-    const result = a_int | b_int;
-
-    return result == @as(WarpRegister(u1), @splat(1));
-}
-
-pub fn vectorBoolXor(a: WarpRegister(bool), b: WarpRegister(bool)) WarpRegister(bool) {
-    const a_int = @intFromBool(a);
-    const b_int = @intFromBool(b);
-    const result = a_int ^ b_int;
-
-    return result == @as(WarpRegister(u1), @splat(1));
-}
-
-pub fn vectorBoolNot(a: WarpRegister(bool)) WarpRegister(bool) {
-    const a_int = @intFromBool(a);
-
-    return ~a_int == @as(WarpRegister(u1), @splat(1));
 }
 
 ///An image copy that can scale, format cast and layout transition

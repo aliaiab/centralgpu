@@ -2016,7 +2016,7 @@ pub fn flushWithoutCallback() callconv(.c) void {
 
             triangle_id += @as(centralgpu.WarpRegister(u32), @splat(@intCast(triangle_group_id * 8)));
 
-            triangle_mask = centralgpu.vectorBoolAnd(triangle_mask, triangle_id < @as(centralgpu.WarpRegister(u32), @splat(draw_command.triangle_id_start + draw_command.triangle_count)));
+            triangle_mask &= triangle_id < @as(centralgpu.WarpRegister(u32), @splat(draw_command.triangle_id_start + draw_command.triangle_count));
 
             const projected_triangles = centralgpu.processGeometry(
                 geometry_state,
