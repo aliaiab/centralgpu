@@ -227,12 +227,12 @@ pub fn main() !void {
         gl.glDisable(gl.GL_DEPTH_TEST);
 
         gl.glActiveTexture(gl.GL_TEXTURE0);
-        gl.glBindTexture(gl.GL_TEXTURE_2D, shambler_texture);
+        gl.glBindTexture(gl.GL_TEXTURE_2D, test_texture_handle);
         gl.glEnable(gl.GL_TEXTURE_2D);
 
         if (false) {
             gl.glActiveTexture(gl.GL_TEXTURE0);
-            gl.glBindTexture(gl.GL_TEXTURE_2D, shambler_texture);
+            gl.glBindTexture(gl.GL_TEXTURE_2D, test_texture_handle);
             gl.glEnable(gl.GL_TEXTURE_2D);
 
             // gl.glTranslatef(@sin(time_since_start), 0, 0);
