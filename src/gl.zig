@@ -856,7 +856,7 @@ pub export fn glBindTexture(
         context.textures.appendNTimes(context.gpa, .{}, many_to_add) catch @panic("oom");
     }
 
-    std.debug.assert(texture < context.textures.items.len);
+    std.debug.assert(texture -| 1 < context.textures.items.len);
 
     context.texture_units[context.texture_unit_active] = texture;
 }

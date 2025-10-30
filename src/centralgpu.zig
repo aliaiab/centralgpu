@@ -1476,7 +1476,7 @@ pub inline fn maskedGather(
 }
 
 //Computes the derivative of value within the quad
-pub fn quadComputeDerivative(value: WarpRegister(f32)) WarpVec2(f32) {
+pub inline fn quadComputeDerivative(value: WarpRegister(f32)) WarpVec2(f32) {
     const neighbour_x = quadReadNeigbhourX(value);
     const neighbour_y = quadReadNeigbhourY(value);
 
@@ -1487,7 +1487,7 @@ pub fn quadComputeDerivative(value: WarpRegister(f32)) WarpVec2(f32) {
 }
 
 //Computes the coarse derivative of value within the quad
-pub fn quadComputeDerivativeCoarse(value: WarpRegister(f32)) WarpVec2(f32) {
+pub inline fn quadComputeDerivativeCoarse(value: WarpRegister(f32)) WarpVec2(f32) {
     const neighbour_x = quadReadNeigbhourX(value);
     const neighbour_y = quadReadNeigbhourY(value);
 
@@ -1497,9 +1497,9 @@ pub fn quadComputeDerivativeCoarse(value: WarpRegister(f32)) WarpVec2(f32) {
     return .{ .x = @splat(diff_x[0]), .y = @splat(diff_y[0]) };
 }
 
-///Reads the quad neighbour to the right for each warp thread
+///Reads the quad neighbour to the right or to the left of each warp thread
 ///Same as QuadReadAcrossX in Hlsl
-pub fn quadReadNeigbhourX(warp_value: WarpRegister(f32)) WarpRegister(f32) {
+pub inline fn quadReadNeigbhourX(warp_value: WarpRegister(f32)) WarpRegister(f32) {
     const shuffled = @shuffle(f32, warp_value, warp_value, WarpRegister(i32){
         1, 0, 3, 2,
         5, 4, 7, 6,
@@ -1508,9 +1508,9 @@ pub fn quadReadNeigbhourX(warp_value: WarpRegister(f32)) WarpRegister(f32) {
     return shuffled;
 }
 
-///Reads the quad neighbour below each warp thread
+///Reads the quad neighbour abover or below each warp thread
 ///Same as QuadReadAcrossY in Hlsl
-pub fn quadReadNeigbhourY(warp_value: WarpRegister(f32)) WarpRegister(f32) {
+pub inline fn quadReadNeigbhourY(warp_value: WarpRegister(f32)) WarpRegister(f32) {
     const shuffled = @shuffle(f32, warp_value, warp_value, WarpRegister(i32){
         4, 5, 6, 7,
         0, 1, 2, 3,
@@ -1549,8 +1549,8 @@ pub inline fn quadImageSample(
         base,
         descriptor,
         uv,
-        quadComputeDerivativeCoarse(uv.x),
-        quadComputeDerivativeCoarse(uv.y),
+        quadComputeDerivative(uv.x),
+        quadComputeDerivative(uv.y),
     );
 }
 
@@ -1576,19 +1576,22 @@ pub inline fn imageSampleDerivative(
     const length_x = scaled_du_dx * scaled_du_dx + scaled_dv_dx * scaled_dv_dx;
     const length_y = scaled_du_dy * scaled_du_dy + scaled_dv_dy * scaled_dv_dy;
     const rho_factor = @max(length_x, length_y);
-    const mip_level = @as(WarpRegister(f32), @splat(0.5)) * @max(@as(WarpRegister(f32), @splat(0)), fastApproxLog2(rho_factor));
+    var mip_level = @max(@as(WarpRegister(f32), @splat(0)), fastApproxLog2(rho_factor));
+
+    mip_level *= @splat(0.5);
 
     const visualize_mip_level = false;
 
     @setEvalBranchQuota(10000);
 
-    const mip_colours: [6]u32 = .{
+    const mip_colours: [7]u32 = .{
         packUnorm4x(.init(.{ 1, 1, 1, 1 }))[0],
         packUnorm4x(.init(.{ 1, 0, 0, 1 }))[0],
         packUnorm4x(.init(.{ 0, 1, 0, 1 }))[0],
         packUnorm4x(.init(.{ 0, 0, 1, 1 }))[0],
         packUnorm4x(.init(.{ 0, 1, 1, 1 }))[0],
         packUnorm4x(.init(.{ 1, 0, 1, 1 }))[0],
+        packUnorm4x(.init(.{ 1, 1, 0, 1 }))[0],
     };
 
     if (visualize_mip_level) {
@@ -1597,34 +1600,15 @@ pub inline fn imageSampleDerivative(
         mip_level_index = std.math.clamp(mip_level_index, @as(WarpRegister(u32), @splat(0)), @as(WarpRegister(u32), @splat(mip_colours.len - 1)));
 
         const colour_packed = maskedGather(u32, execution_mask, &mip_colours, mip_level_index);
-        var colour = unpackUnorm4x(colour_packed);
-
-        if (false) {
-            colour = .{
-                .x = @select(
-                    f32,
-                    mip_level < @as(WarpRegister(f32), @splat(0)),
-                    @as(WarpRegister(f32), @splat(1)),
-                    @as(WarpRegister(f32), @splat(0)),
-                ),
-                .y = @floor(mip_level) / @as(WarpRegister(f32), @splat(@floatFromInt(descriptor.max_mip_level + 1))),
-                .z = @splat(0),
-                .w = @splat(1),
-            };
-        }
+        const colour = unpackUnorm4x(colour_packed);
 
         return colour;
     }
 
-    //TESTING: Set to a constant
     const max_level: WarpRegister(u32) = @splat(descriptor.max_mip_level);
 
     var level: WarpRegister(u32) = @intFromFloat(@floor(mip_level));
-    // level = max_level - level;
-    // var level: WarpRegister(u32) = @splat(4);
     level = @min(max_level, level);
-    // level = @splat(0);
-    // level = max_level;
 
     switch (descriptor.sampler_filter) {
         .nearest => return imageSampleNearest(execution_mask, base, descriptor, level, uv),
@@ -2217,6 +2201,7 @@ pub fn homogenousProject(v: Homogenous2D) WarpVec2(f32) {
     return .{ .x = v.x * reciprocal_w, .y = v.y * reciprocal_w };
 }
 
+///Computes an approxmation of log_2(z) based on a taylor polynomial
 fn fastApproxLog2(z: WarpRegister(f32)) WarpRegister(f32) {
     const z_as_int: WarpRegister(u32) = @bitCast(@abs(z));
     const z_exponent_bits = z_as_int >> @as(WarpRegister(f32), @splat(23));
