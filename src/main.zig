@@ -9,9 +9,6 @@ pub fn main() !void {
     var window: ?*sdl.SDL_Window = undefined;
     var renderer: ?*sdl.SDL_Renderer = undefined;
 
-    const render_target_width: usize = 640;
-    const render_target_height: usize = 480;
-
     _ = sdl.SDL_CreateWindowAndRenderer(
         "Centralgpu Example",
         640,
@@ -22,6 +19,12 @@ pub fn main() !void {
     );
     defer sdl.SDL_DestroyRenderer(renderer);
     defer sdl.SDL_DestroyWindow(window);
+
+    const target_width = 640;
+    const target_height = 480;
+
+    const render_target_width: usize = target_width;
+    const render_target_height: usize = target_height;
 
     const target_texture = sdl.SDL_CreateTexture(
         renderer,
@@ -51,23 +54,67 @@ pub fn main() !void {
 
     gl.current_context.?.* = .{
         .gpa = gpa,
-        .render_area_width = 720,
-        .render_area_height = 480,
-        .bound_render_target = .{ .pixel_ptr = target_buffer.ptr, .width = render_target_width, .height = render_target_height },
-        .depth_image = try gpa.alloc(centralgpu.Depth24Stencil8, render_target_width * render_target_height),
+        .render_area_width = target_width,
+        .render_area_height = target_height,
+        .bound_render_target = undefined,
+        .depth_image = undefined,
         .raster_tile_buffer = undefined,
+        .viewport = .{
+            .x = 0,
+            .y = 0,
+            .width = @intCast(target_width),
+            .height = @intCast(target_height),
+        },
+        .scissor = .{
+            .x = 0,
+            .y = 0,
+            .width = @intCast(target_width),
+            .height = @intCast(target_height),
+        },
     };
-    const shambler_texture_data = try std.fs.cwd().readFileAlloc(gpa, "zig-out/bin/shambler_base_color.data", std.math.maxInt(usize));
+
+    {
+        const target_padded_width = centralgpu.computeTargetPaddedSize(target_width);
+        const target_padded_height = centralgpu.computeTargetPaddedSize(target_height);
+
+        const target_tile_width = target_padded_width / centralgpu.tile_width + @intFromBool(target_width % 16 != 0);
+        const target_tile_height = target_padded_height / centralgpu.tile_height + @intFromBool(target_height % 16 != 0);
+
+        const tile_buffer = gpa.alloc(centralgpu.RasterTileBuffer.Tile, target_tile_width * target_tile_height) catch @panic("oom");
+
+        @memset(tile_buffer, .{
+            .triangles = undefined,
+            .triangle_count = 0,
+        });
+
+        gl.current_context.?.raster_tile_buffer.tile_data = tile_buffer;
+        gl.current_context.?.bound_render_target = .{
+            .width = target_width,
+            .height = target_height,
+            .pixel_ptr = target_buffer.ptr,
+        };
+        gl.current_context.?.depth_image = try gpa.alloc(centralgpu.Depth24Stencil8, target_padded_width * target_padded_height);
+        gl.current_context.?.raster_tile_buffer.stream_states = .empty;
+        gl.current_context.?.raster_tile_buffer.stream_triangles = .empty;
+    }
+
+    gl.current_context.?.raster_tile_buffer.gpa = gpa;
+    gl.current_context.?.raster_tile_buffer.thread_pool.init(.{
+        .allocator = gpa,
+    }) catch @panic("oom");
+
+    const shambler_texture_data = try std.fs.cwd().readFileAlloc(gpa, "zig-out/bin/floor.data", std.math.maxInt(usize));
     defer gpa.free(shambler_texture_data);
-    // const test_texture_data = try std.fs.cwd().readFileAlloc(gpa, "zig-out/bin/texture_liquid.data", std.math.maxInt(usize));
-    const test_texture_data = try std.fs.cwd().readFileAlloc(gpa, "zig-out/bin/wood_floor.data", std.math.maxInt(usize));
-    defer gpa.free(test_texture_data);
+
+    const test_texture_data = shambler_texture_data;
 
     var shambler_texture: u32 = 0;
 
     gl.glGenTextures(1, &shambler_texture);
 
     std.debug.assert(shambler_texture != 0);
+
+    std.log.info("{}", .{shambler_texture});
 
     gl.glBindTexture(gl.GL_TEXTURE_2D, shambler_texture);
 
@@ -82,11 +129,7 @@ pub fn main() !void {
         0,
         gl.GL_RGBA,
         1024,
-        256,
-        // 800,
-        // 600,
-        // 242,
-        // 84,
+        1024,
         0,
         gl.GL_RGBA,
         gl.GL_UNSIGNED_BYTE,
@@ -113,8 +156,8 @@ pub fn main() !void {
         gl.GL_RGBA,
         // 1024,
         // 256,
-        800,
-        600,
+        1024,
+        1024,
         // 242,
         // 84,
         0,
@@ -139,6 +182,7 @@ pub fn main() !void {
         const time_since_start: f32 = @floatFromInt(std.time.milliTimestamp() - start_time);
 
         const matrix_math = @import("gl/matrix.zig");
+        _ = matrix_math; // autofix
 
         var window_width_int: i32 = 0;
         var window_height_int: i32 = 0;
@@ -146,6 +190,7 @@ pub fn main() !void {
         _ = sdl.SDL_GetWindowSize(window, &window_width_int, &window_height_int);
 
         const aspect_ratio: f32 = @as(f32, @floatFromInt(window_width_int)) / @as(f32, @floatFromInt(window_height_int));
+        _ = aspect_ratio; // autofix
 
         if (getKeyPressed(sdl.SDL_SCANCODE_F)) {
             // gl.current_context.?.texture_descriptor.sampler_filter = switch (gl.current_context.?.texture_descriptor.sampler_filter) {
@@ -168,117 +213,74 @@ pub fn main() !void {
             // gl.current_context.?.texture_descriptor.border_colour_shift_amount %= 5;
         }
 
-        if (true) {
-            gl.glViewport(0, 0, render_target_width, render_target_height);
-            gl.glScissor(0, 0, render_target_width, render_target_height);
+        gl.glViewport(0, 0, target_width, target_height);
+        gl.glScissor(0, 0, target_width, target_height);
 
-            gl.glClearColor(0, 0.2, 0.3, 1);
-            gl.glClear(gl.GL_COLOR_BUFFER_BIT);
+        gl.glClearColor(0.4, 0.4, 0.4, 1);
+        gl.glClear(gl.GL_COLOR_BUFFER_BIT);
 
+        gl.glMatrixMode(gl.GL_PROJECTION);
+        gl.glLoadIdentity();
+        gl.glMatrixMode(gl.GL_MODELVIEW);
+        gl.glLoadIdentity();
+        gl.glDisable(gl.GL_CULL_FACE);
+        gl.glDisable(gl.GL_DEPTH_TEST);
+
+        gl.glActiveTexture(gl.GL_TEXTURE0);
+        gl.glBindTexture(gl.GL_TEXTURE_2D, shambler_texture);
+        gl.glEnable(gl.GL_TEXTURE_2D);
+
+        if (false) {
             gl.glActiveTexture(gl.GL_TEXTURE0);
-            gl.glBindTexture(gl.GL_TEXTURE_2D, test_texture_handle);
+            gl.glBindTexture(gl.GL_TEXTURE_2D, shambler_texture);
+            gl.glEnable(gl.GL_TEXTURE_2D);
+
+            // gl.glTranslatef(@sin(time_since_start), 0, 0);
+
+            gl.glBegin(gl.GL_TRIANGLES);
+            defer gl.glEnd();
+
+            gl.glColor4f(1, 1, 0, 0);
+
+            gl.glTexCoord2f(0, 0);
+            gl.glVertex3f(-0.5, -0.5, 0);
+
+            gl.glTexCoord2f(1, 0);
+            gl.glVertex3f(0.5, -0.5, 0);
+
+            gl.glTexCoord2f(0.5, 1);
+            gl.glVertex3f(0, 0.5, 0);
+        }
+
+        if (true) {
             gl.glMatrixMode(gl.GL_PROJECTION);
             gl.glLoadIdentity();
             gl.glMatrixMode(gl.GL_MODELVIEW);
             gl.glLoadIdentity();
 
+            gl.glScalef(1 + @sin(time_since_start * 0.0001), 1 + @sin(time_since_start * 0.0001), 1);
+            gl.glRotatef(360 * @cos(time_since_start * 0.0005), 0, 0, 1);
+            gl.glTranslatef(-0.5, -0.5, 0);
+            // gl.glTranslatef(@sin(time_since_start * 0.001), 0, 0);
+
             gl.glBegin(gl.GL_QUADS);
 
-            gl.glTranslatef(0, 0, 0.1);
-
             gl.glTexCoord2f(0, 0);
             gl.glVertex2f(0, 0);
 
-            gl.glTexCoord2f(1, 0);
-            gl.glVertex2f(1, 0);
-
-            gl.glTexCoord2f(0, 1);
+            gl.glTexCoord2f(0, 2);
             gl.glVertex2f(0, 1);
 
-            gl.glTexCoord2f(1, 1);
+            gl.glTexCoord2f(2, 2);
             gl.glVertex2f(1, 1);
 
-            gl.glTranslatef(-1, -0.5, 0.1);
-
-            gl.glTexCoord2f(0, 0);
-            gl.glVertex2f(0, 0);
-
-            gl.glTexCoord2f(1, 0);
+            gl.glTexCoord2f(2, 0);
             gl.glVertex2f(1, 0);
-
-            gl.glTexCoord2f(0, 1);
-            gl.glVertex2f(0, 1);
-
-            gl.glTexCoord2f(1, 1);
-            gl.glVertex2f(1, 1);
 
             gl.glEnd();
+        }
 
-            if (true) {
-                gl.glBindTexture(gl.GL_TEXTURE_2D, shambler_texture);
-
-                gl.glBegin(gl.GL_TRIANGLES);
-
-                const projection_matrix = matrix_math.perspectiveNonReversedZ(
-                    std.math.tau * 0.20,
-                    aspect_ratio,
-                    0.1,
-                    500,
-                );
-
-                gl.glMatrixMode(gl.GL_PROJECTION);
-                gl.glLoadIdentity();
-                gl.glLoadMatrixf(@ptrCast(&matrix_math.transpose(projection_matrix)));
-                gl.glScalef(1, 1, -1);
-
-                gl.glMatrixMode(gl.GL_MODELVIEW);
-                gl.glLoadIdentity();
-                // gl.glScale3f(1, 1, 1);
-                // gl.glTranslate3f(@sin(time_since_start * 0.0005), 0, 0);
-
-                // gl.glScale3f(1, 0.5 * @sin(time_since_start * 0.0005), 1);
-
-                // gl.glTranslate3f(0, 0, @sin(time_since_start * 0.001) * 4);
-                gl.glTranslatef(@sin(time_since_start * 0.001) * 0, 0, 5.5 + @sin(time_since_start * 0.001));
-                gl.glRotatef(time_since_start * 0.0001 * 360, 0, 1, 0);
-
-                const uv_scale: f32 = 2 + @cos(time_since_start * 0.001);
-                // const uv_scale: f32 = 1;
-
-                // gl.glColor3f(1.0, 0.0, 0.0);
-                gl.glColor3f(1.0, 1.0, 1.0);
-                gl.glTexCoord2f(0.5 * uv_scale, 0);
-                gl.glVertex3f(0, 1, 0);
-
-                // gl.glColor3f(0.0, 1.0, 0.0);
-                gl.glColor3f(1.0, 1.0, 1.0);
-                gl.glTexCoord2f(0, 1 * uv_scale);
-                gl.glVertex3f(-1, -1, 0);
-
-                // gl.glColor3f(0.0, 0.0, 1.0);
-                gl.glColor3f(1.0, 1.0, 1.0);
-                gl.glTexCoord2f(1 * uv_scale, 1 * uv_scale);
-                gl.glVertex3f(1, -1, 0);
-
-                gl.glLoadIdentity();
-                gl.glTranslatef(0, 0, 1);
-                gl.glBindTexture(gl.GL_TEXTURE_2D, test_texture_handle);
-
-                // gl.glColor3f(1.0, 0.0, 0.0);
-                // gl.glTexCoord2f(0, 0);
-                // gl.glVertex2f(@sin(time_since_start * 0.001) * 2, 1);
-
-                // gl.glColor3f(0.0, 1.0, 0.0);
-                // gl.glTexCoord2f(1, 0);
-                // gl.glVertex2f(-1 + @sin(time_since_start * 0.001) * 2, -1);
-
-                // gl.glColor3f(0.0, 0.0, 1.0);
-                // gl.glTexCoord2f(0, 1);
-                // gl.glVertex2f(1 + @sin(time_since_start * 0.001) * 2, -1);
-
-                gl.glEnd();
-            }
-
+        {
             const raster_time_gl = std.time.nanoTimestamp();
             gl.glFlush();
 
@@ -349,9 +351,9 @@ pub fn main() !void {
                     centralgpu.blitRasterTargetToLinear(
                         target_buffer.ptr,
                         pixel_ptr,
-                        render_target_width,
-                        render_target_width,
-                        render_target_height,
+                        target_width,
+                        target_width,
+                        target_height,
                         surface_width,
                         surface_height,
                     );
