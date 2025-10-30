@@ -1475,6 +1475,21 @@ pub inline fn maskedGather(
     }
 }
 
+pub inline fn maskedScatter(
+    comptime T: type,
+    predicate: @Vector(8, bool),
+    base: [*]T,
+    address: @Vector(8, u32),
+    values: @Vector(8, T),
+) void {
+    //TODO: add inline assembly for platforms that support scatter natively
+    inline for (0..8) |i| {
+        if (predicate[i]) {
+            base[address[i]] = values[i];
+        }
+    }
+}
+
 //Computes the derivative of value within the quad
 pub inline fn quadComputeDerivative(value: WarpRegister(f32)) WarpVec2(f32) {
     const neighbour_x = quadReadNeigbhourX(value);
@@ -1526,22 +1541,13 @@ pub inline fn quadImageSample(
     uv: WarpVec2(f32),
 ) WarpVec4(f32) {
     if (descriptor.max_mip_level == 0) {
-        switch (descriptor.sampler_filter) {
-            .nearest => return imageSampleNearest(
-                execution_mask,
-                base,
-                descriptor,
-                @splat(0),
-                uv,
-            ),
-            .bilinear => return imageSampleBilinear(
-                execution_mask,
-                base,
-                descriptor,
-                @splat(0),
-                uv,
-            ),
-        }
+        return imageSample(
+            execution_mask,
+            base,
+            descriptor,
+            @splat(0),
+            uv,
+        );
     }
 
     return imageSampleDerivative(
@@ -1610,6 +1616,17 @@ pub inline fn imageSampleDerivative(
     var level: WarpRegister(u32) = @intFromFloat(@floor(mip_level));
     level = @min(max_level, level);
 
+    return imageSample(execution_mask, base, descriptor, level, uv);
+}
+
+pub inline fn imageSample(
+    execution_mask: WarpRegister(bool),
+    ///Base address from which the descriptor loads
+    base: [*]const u32,
+    descriptor: ImageDescriptor,
+    level: WarpRegister(u32),
+    uv: WarpVec2(f32),
+) WarpVec4(f32) {
     switch (descriptor.sampler_filter) {
         .nearest => return imageSampleNearest(execution_mask, base, descriptor, level, uv),
         .bilinear => return imageSampleBilinear(execution_mask, base, descriptor, level, uv),
@@ -1786,14 +1803,42 @@ pub inline fn imageLoad(
     const width: WarpRegister(i32) = @splat(@as(i32, 1) << @as(u5, descriptor.width_log2));
     const height: WarpRegister(i32) = @splat(@as(i32, 1) << @as(u5, descriptor.height_log2));
 
-    actual_mask = vectorBoolAnd(actual_mask, physical_position.x >= min_x);
-    actual_mask = vectorBoolAnd(actual_mask, physical_position.y >= min_y);
-    actual_mask = vectorBoolAnd(actual_mask, physical_position.x < width);
-    actual_mask = vectorBoolAnd(actual_mask, physical_position.y < height);
+    actual_mask &= physical_position.x >= min_x;
+    actual_mask &= physical_position.y >= min_y;
+    actual_mask &= physical_position.x < width;
+    actual_mask &= physical_position.y < height;
 
     const sample_packed = maskedGather(u32, actual_mask, base, @intCast(pixel_address));
 
     return @select(u32, actual_mask, sample_packed, border_colour);
+}
+
+pub inline fn imageStore(
+    execution_mask: WarpRegister(bool),
+    ///Base address from which the descriptor loads
+    base: [*]u32,
+    descriptor: ImageDescriptor,
+    ///Specify the mip level to sample from
+    level: WarpRegister(u32),
+    ///Image coordinates
+    physical_position: WarpVec2(i32),
+    //The value to be stored
+    value: WarpRegister(u32),
+) void {
+    const texel_address = imageAddress(
+        descriptor,
+        level,
+        physical_position.x,
+        physical_position.y,
+    );
+
+    maskedScatter(
+        u32,
+        execution_mask,
+        base,
+        texel_address,
+        value,
+    );
 }
 
 ///Returns the physical image coordinates for the normalized sampler coordinates
@@ -2120,6 +2165,112 @@ pub fn blitRasterTargetToLinearSimd(
             maskedStore(u32, mask, @ptrCast(@alignCast(dst_pixels + dst_y * dst_width)), src_pixel);
         }
     }
+}
+
+///Blits an image with a linear filter
+pub fn imageBlit(
+    src_image: ImageDescriptor,
+    dst_image: ImageDescriptor,
+    src_level: u32,
+    dst_level: u32,
+    src_base: [*]const Rgba32,
+    dst_base: [*]Rgba32,
+    filter: ImageDescriptor.SamplerFilter,
+) void {
+    var src_descriptor = src_image;
+
+    src_descriptor.sampler_filter = filter;
+
+    var dst_width = @as(u32, 1) << dst_image.width_log2;
+    var dst_height = @as(u32, 1) << dst_image.height_log2;
+
+    dst_width >>= @intCast(dst_level);
+    dst_height >>= @intCast(dst_level);
+
+    std.debug.assert(dst_width != 0);
+    std.debug.assert(dst_height != 0);
+
+    const execution_width = std.math.divCeil(usize, dst_width, 4) catch unreachable;
+    const execution_height = std.math.divCeil(usize, dst_height, 2) catch unreachable;
+
+    const dst_width_vec: WarpRegister(u32) = @splat(@intCast(dst_width));
+    const dst_height_vec: WarpRegister(u32) = @splat(@intCast(dst_height));
+
+    var inv_dst_width_vec: WarpRegister(f32) = @floatFromInt(dst_width_vec);
+    var inv_dst_height_vec: WarpRegister(f32) = @floatFromInt(dst_height_vec);
+
+    inv_dst_width_vec = reciprocal(inv_dst_width_vec);
+    inv_dst_height_vec = reciprocal(inv_dst_height_vec);
+
+    for (0..execution_height) |invocation_y| {
+        for (0..execution_width) |invocation_x| {
+            const position_x_offset: WarpRegister(u32) = .{
+                0, 1, 2, 3,
+                0, 1, 2, 3,
+            };
+            const position_y_offset: WarpRegister(u32) = .{
+                0, 0, 0, 0,
+                1, 1, 1, 1,
+            };
+
+            const position_x_base: WarpRegister(u32) = @splat(@intCast(invocation_x * 4));
+            const position_y_base: WarpRegister(u32) = @splat(@intCast(invocation_y * 2));
+
+            const position_x = position_x_base + position_x_offset;
+            const position_y = position_y_base + position_y_offset;
+
+            var execution_mask: WarpRegister(bool) = @splat(true);
+
+            execution_mask &= position_x < dst_width_vec;
+            execution_mask &= position_y < dst_height_vec;
+
+            var u: WarpRegister(f32) = @floatFromInt(position_x);
+            var v: WarpRegister(f32) = @floatFromInt(position_y);
+
+            u *= inv_dst_width_vec;
+            v *= inv_dst_height_vec;
+
+            const sample = imageSample(
+                execution_mask,
+                @ptrCast(src_base),
+                src_descriptor,
+                @splat(src_level),
+                .{ .x = u, .y = v },
+            );
+
+            const level_vec: WarpRegister(u5) = @splat(@intCast(dst_level));
+
+            //TODO: is this the most efficient way to do this?
+            imageStore(
+                execution_mask,
+                @ptrCast(dst_base),
+                dst_image,
+                @splat(dst_level),
+                .{ .x = @bitCast(position_x << level_vec), .y = @bitCast(position_y << level_vec) },
+                packUnorm4x(sample),
+            );
+        }
+    }
+}
+
+///Load a pixel from a render target
+pub fn renderTargetLoad(
+    target_base: [*]const Rgba32,
+    target_width: u32,
+    x: u32,
+    y: u32,
+) Rgba32 {
+    const block_count_x = std.math.divCeil(u32, target_width, 4) catch unreachable;
+
+    const block_x = x / 4;
+    const block_y = y / 4;
+
+    const block_offset_x = x & 0b11;
+    const block_offset_y = y & 0b11;
+
+    const block_begin = target_base + (block_x + block_y * block_count_x) * 16;
+
+    return block_begin[block_offset_x + block_offset_y * 4];
 }
 
 pub fn reciprocal(x: WarpRegister(f32)) WarpRegister(f32) {

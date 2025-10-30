@@ -209,13 +209,6 @@ pub export fn glClear(flags: u32) callconv(.c) void {
 pub export fn glViewport(x: i32, y: i32, w: isize, h: isize) callconv(.c) void {
     const context = current_context.?;
 
-    if (!context.have_seen_viewport) {
-        context.render_area_width = @intCast(w);
-        context.render_area_height = @intCast(h);
-
-        context.have_seen_viewport = true;
-    }
-
     context.viewport = .{
         .x = x,
         .y = y,
@@ -771,24 +764,62 @@ pub export fn glCopyTexSubImage2D(
     level: i32,
     x_offset: i32,
     y_offset: i32,
-    x: i32,
-    y: i32,
-    width: isize,
-    height: isize,
+    _x: i32,
+    _y: i32,
+    _width: isize,
+    _height: isize,
 ) void {
-    _ = x; // autofix
-    _ = y; // autofix
+    if (target != GL_TEXTURE_2D) {
+        @panic("Only GL_TEXTURE_2D is supported");
+    }
 
-    log.info("glCopyTexSubImage2D: target: {}, level: {} x: {}, y: {}, w: {}, h: {}", .{
-        target,
-        level,
-        x_offset,
-        y_offset,
-        width,
-        height,
-    });
+    //Before reading from the framebuffer we must flush
+    //We need to use flush without invoking the callback so we don't present the render result of the flush
+    flushWithoutCallback();
 
-    // @panic("glCopyTexSubImage2D");
+    const context = current_context.?;
+    const texture = &context.textures.items[context.texture_units[context.texture_unit_active] - 1];
+
+    const width: u32 = @intCast(_width);
+    const height: u32 = @intCast(_height);
+
+    const x: u32 = @intCast(_x);
+
+    var y: u32 = @intCast(_y);
+
+    y += height;
+    y = context.bound_render_target.height - y;
+
+    for (0..height) |src_y_offset| {
+        const src_y = y + src_y_offset;
+        for (0..width) |src_x_offset| {
+            const src_x = x + src_x_offset;
+            const sample = centralgpu.renderTargetLoad(
+                context.bound_render_target.pixel_ptr,
+                context.bound_render_target.width,
+                @intCast(src_x),
+                @intCast(src_y),
+            );
+
+            const dst_x = @as(u32, @intCast(x_offset)) + src_x_offset;
+            const dst_y = @as(u32, @intCast(y_offset)) + src_y_offset;
+
+            centralgpu.imageStore(
+                .{
+                    true,  false, false, false,
+                    false, false, false, false,
+                },
+                @ptrCast(texture.texture_data.ptr),
+                texture.descriptor,
+                @splat(@intCast(level)),
+                .{
+                    .x = @splat(@intCast(dst_x)),
+                    .y = @splat(@intCast(texture.height - 1 - dst_y)),
+                },
+                @splat(@bitCast(sample)),
+            );
+        }
+    }
 }
 
 pub export fn glGenTextures(
@@ -810,8 +841,6 @@ pub export fn glDeleteTextures(
     n: isize,
     textures: [*c]u32,
 ) callconv(.c) void {
-    //TODO: free texture memory
-
     const context = current_context.?;
 
     for (0..@intCast(n)) |k| {
@@ -991,6 +1020,49 @@ pub export fn glGenerateMipmap(
     target: i32,
 ) callconv(.c) void {
     _ = target; // autofix
+
+    var descriptor: *centralgpu.ImageDescriptor = undefined;
+
+    const context = current_context.?;
+
+    const texture = &context.textures.items[context.texture_units[context.texture_unit_active] - 1];
+
+    descriptor = &texture.descriptor;
+
+    std.debug.assert(descriptor.max_mip_level == 0);
+
+    const image_width = @as(usize, 1) << descriptor.width_log2;
+    const image_height = @as(usize, 1) << descriptor.height_log2;
+
+    var mip_width: usize = image_width;
+    var mip_height: usize = image_height;
+
+    var src_mip: u32 = 0;
+
+    while (true) {
+        if (mip_width > 1) mip_width /= 2;
+        if (mip_height > 1) mip_height /= 2;
+
+        centralgpu.imageBlit(
+            descriptor.*,
+            descriptor.*,
+            src_mip,
+            src_mip + 1,
+            texture.texture_data.ptr,
+            texture.texture_data.ptr,
+            .bilinear,
+        );
+
+        descriptor.max_mip_level += 1;
+
+        src_mip += 1;
+
+        if (mip_width <= 1 and mip_height <= 1) {
+            break;
+        }
+    }
+
+    std.debug.assert(descriptor.max_mip_level != 0);
 }
 
 pub export fn glBegin(flags: u32) callconv(.c) void {
@@ -1799,15 +1871,19 @@ pub export fn glColor4ubv(color: [*]u8) callconv(.c) void {
 pub export fn glFlush() callconv(.c) void {
     const context = current_context.?;
 
-    defer {
-        if (context.flush_callback != null) {
-            context.flush_callback.?();
-        }
+    flushWithoutCallback();
 
-        context.profile_data = .{};
+    if (context.flush_callback != null) {
+        context.flush_callback.?();
     }
 
-    if (context.should_clear_color_attachment or true) {
+    context.profile_data = .{};
+}
+
+pub fn flushWithoutCallback() callconv(.c) void {
+    const context = current_context.?;
+
+    if (context.should_clear_color_attachment) {
         const colour_image_words: []u32 = @ptrCast(@alignCast(context.bound_render_target.pixel_ptr[0 .. context.bound_render_target.width * context.bound_render_target.height]));
 
         const colour_image: []@Vector(8, u32) = @ptrCast(@alignCast(colour_image_words));
@@ -1817,7 +1893,7 @@ pub export fn glFlush() callconv(.c) void {
         context.should_clear_color_attachment = false;
     }
 
-    if (context.should_clear_depth_attachment or true) {
+    if (context.should_clear_depth_attachment) {
         //TODO: handle not clearing the stencil values
         const depth_clear = centralgpu.packDepthStencil(@splat(0), @splat(0xff));
         const depth_image: []@Vector(8, u32) = @ptrCast(@alignCast(context.depth_image));

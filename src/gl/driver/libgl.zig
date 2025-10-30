@@ -82,7 +82,7 @@ export fn glGetString(name: i32) callconv(.c) [*:0]const u8 {
             return "1.5.0";
         },
         gl_c.GL_EXTENSIONS => {
-            return "GL_ARB_multitexture GL_ARB_texture_env_combine GL_ARB_texture_env_add";
+            return "GL_ARB_multitexture GL_ARB_texture_env_combine GL_ARB_texture_env_add GL_EXT_framebuffer_object";
         },
         else => {
             std.log.info("glGetString: name = {}", .{name});
@@ -100,14 +100,16 @@ pub export fn SDL_GL_GetProcAddress(
         .{ "glActiveTextureARB", &centralgpu_gl.glActiveTexture },
         .{ "glActiveTexture", &centralgpu_gl.glActiveTexture },
         .{ "glClientActiveTextureARB", &centralgpu_gl.glActiveTexture },
+        .{ "glGenerateMipmapEXT", &centralgpu_gl.glGenerateMipmap },
+        .{ "glGenerateMipmap", &centralgpu_gl.glGenerateMipmap },
     });
 
-    std.log.info("(centralgl) TRYING TO LOAD: {s}\n", .{proc_name});
+    std.debug.print("(centralgl) TRYING TO LOAD: {s}\n", .{proc_name});
 
     if (proc_map.get(std.mem.span(proc_name))) |proc| {
         return proc;
     } else {
-        std.log.info("(centralgl) FAILED TO LOAD: {s}", .{proc_name});
+        std.debug.print("(centralgl) FAILED TO LOAD: {s}", .{proc_name});
         return null;
     }
     return null;
