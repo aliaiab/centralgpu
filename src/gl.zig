@@ -56,7 +56,8 @@ pub const Context = struct {
         .height_log2 = 0,
         .max_mip_level = 0,
         .sampler_filter = .bilinear,
-        .sampler_address_mode = .repeat,
+        .sampler_address_mode_u = .repeat,
+        .sampler_address_mode_v = .repeat,
         .rel_ptr = -1,
         .border_colour = .white,
     },
@@ -736,7 +737,8 @@ pub export fn glTexImage2D(
         .width_log2 = @intCast(std.math.log2_int(usize, @intCast(width))),
         .height_log2 = @intCast(std.math.log2_int(usize, @intCast(height))),
         .sampler_filter = .bilinear,
-        .sampler_address_mode = .repeat,
+        .sampler_address_mode_u = .repeat,
+        .sampler_address_mode_v = .repeat,
         .border_colour = .black_transparent,
     };
 
@@ -980,6 +982,24 @@ pub export fn glTexParameteri(
                 },
                 else => {},
             }
+        },
+        GL_TEXTURE_WRAP_S => {
+            descriptor.sampler_address_mode_u = switch (param) {
+                GL_REPEAT => .repeat,
+                GL_MIRRORED_REPEAT => .repeat_mirrored,
+                GL_CLAMP_TO_EDGE => .clamp_to_edge,
+                GL_CLAMP_TO_BORDER => .clamp_to_border,
+                else => unreachable,
+            };
+        },
+        GL_TEXTURE_WRAP_T => {
+            descriptor.sampler_address_mode_v = switch (param) {
+                GL_REPEAT => .repeat,
+                GL_MIRRORED_REPEAT => .repeat_mirrored,
+                GL_CLAMP_TO_EDGE => .clamp_to_edge,
+                GL_CLAMP_TO_BORDER => .clamp_to_border,
+                else => unreachable,
+            };
         },
         else => {},
     }
@@ -2257,6 +2277,8 @@ pub const GL_MODULATE: i32 = 0x2100;
 pub const GL_NEAREST: i32 = 0x2600;
 pub const GL_REPEAT: i32 = 0x2901;
 pub const GL_CLAMP: i32 = 0x2900;
+pub const GL_MIRRORED_REPEAT: i32 = 0x8370;
+pub const GL_CLAMP_TO_BORDER: i32 = 0x812D;
 
 pub const GL_FOG: i32 = 0x0B60;
 pub const GL_FOG_MODE: i32 = 0x0B65;
