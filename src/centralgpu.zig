@@ -51,9 +51,10 @@ pub const ImageDescriptor = packed struct(u64) {
     height_log2: u4,
     max_mip_level: u4,
     sampler_filter: SamplerFilter,
-    sampler_address_mode: SamplerAddressMode,
+    sampler_address_mode_u: SamplerAddressMode,
+    sampler_address_mode_v: SamplerAddressMode,
     border_colour: BorderColour,
-    _: u14 = 0,
+    _: u12 = 0,
 
     pub const SamplerFilter = enum(u1) {
         nearest,
@@ -61,9 +62,10 @@ pub const ImageDescriptor = packed struct(u64) {
     };
 
     pub const SamplerAddressMode = enum(u2) {
-        repeat,
-        clamp_to_edge,
-        clamp_to_border,
+        repeat = 0b00,
+        repeat_mirrored = 0b01,
+        clamp_to_edge = 0b10,
+        clamp_to_border = 0b11,
     };
 
     ///border_colour = 0xff_ff_ff_ff << (border_colour_shift_amount << 3)
@@ -80,6 +82,16 @@ pub const ImageDescriptor = packed struct(u64) {
         black_transparent = 4,
         _,
     };
+
+    ///Returns the number of mips in a complete mip chain
+    pub inline fn mipLevelCount(descriptor: ImageDescriptor) u4 {
+        const wh_exponent = @as(u5, descriptor.width_log2) + @as(u5, descriptor.height_log2);
+
+        //equal to divCeil(wh_exponent, 2);
+        const mip_count = (wh_exponent >> 1) + @intFromBool(wh_exponent & 1 != 0);
+
+        return @truncate(mip_count);
+    }
 };
 
 const warp_register_len = std.simd.suggestVectorLength(u32).?;
@@ -1627,13 +1639,13 @@ pub inline fn imageSampleBilinear(
     const inv_v_scale = @as(WarpRegister(f32), @splat(1)) / v_scale;
 
     const half: WarpRegister(f32) = @splat(0.5);
-    const one_and_half: WarpRegister(f32) = @splat(1.5);
-    _ = one_and_half; // autofix
+    const one: WarpRegister(f32) = @splat(1);
+
+    const sample_location = uv.add(.{ .x = -half * inv_u_scale, .y = -half * inv_v_scale });
 
     const sample_loc_0_float = imageSamplerAddressFloat(
         descriptor,
-        // uv.add(.{ .x = half * inv_u_scale, .y = half * inv_v_scale }),
-        uv,
+        sample_location,
     );
 
     const sample_loc_0: WarpVec2(i32) = .{
@@ -1642,24 +1654,17 @@ pub inline fn imageSampleBilinear(
     };
     const sample_loc_1 = imageSamplerAddress(
         descriptor,
-        // uv.add(.{ .x = one_and_half * inv_u_scale, .y = half * inv_v_scale }),
-        uv.add(.{ .x = half * inv_u_scale, .y = @splat(0) }),
+        sample_location.add(.{ .x = one * inv_u_scale, .y = @splat(0) }),
     );
     const sample_loc_2 = imageSamplerAddress(
         descriptor,
-        // uv.add(.{ .x = half * inv_u_scale, .y = one_and_half * inv_v_scale }),
-        uv.add(.{ .x = @splat(0), .y = half * inv_v_scale }),
+        sample_location.add(.{ .x = @splat(0), .y = one * inv_v_scale }),
     );
     const sample_loc_3 = imageSamplerAddress(
         descriptor,
-        // uv.add(.{ .x = one_and_half * inv_u_scale, .y = one_and_half * inv_v_scale }),
-        uv.add(.{ .x = half * inv_u_scale, .y = half * inv_v_scale }),
+        sample_location.add(.{ .x = one * inv_u_scale, .y = one * inv_v_scale }),
     );
 
-    const texel_point_x: WarpRegister(i32) = @intFromFloat(@floor(sample_loc_0_float.x));
-    _ = texel_point_x; // autofix
-    const texel_point_y: WarpRegister(i32) = @intFromFloat(@floor(sample_loc_0_float.y));
-    _ = texel_point_y; // autofix
     const texel_point_offset_x = sample_loc_0_float.x - @floor(sample_loc_0_float.x);
     const texel_point_offset_y = sample_loc_0_float.y - @floor(sample_loc_0_float.y);
 
@@ -1826,29 +1831,83 @@ pub inline fn imageSamplerAddressFloat(
 ) WarpVec2(f32) {
     @setRuntimeSafety(false);
 
-    //Handle wrapping
     var u: WarpRegister(f32) = uv.x;
     var v: WarpRegister(f32) = uv.y;
 
-    switch (descriptor.sampler_address_mode) {
-        .repeat => {
-            u = u - @floor(u);
-            v = v - @floor(v);
-        },
-        .clamp_to_edge => {
-            u = @max(@min(u, @as(WarpRegister(f32), @splat(1))), @as(WarpRegister(f32), @splat(0)));
-            v = @max(@min(v, @as(WarpRegister(f32), @splat(1))), @as(WarpRegister(f32), @splat(0)));
-        },
-        .clamp_to_border => {},
-    }
+    const u_repeat = u - @floor(u);
+    const v_repeat = v - @floor(v);
 
-    const u_scale: WarpRegister(f32) = @splat(@floatFromInt((@as(u32, 1) << @as(u5, descriptor.width_log2)) - 1));
-    const v_scale: WarpRegister(f32) = @splat(@floatFromInt((@as(u32, 1) << @as(u5, descriptor.height_log2)) - 1));
+    const u_int: WarpRegister(i32) = @intFromFloat(u);
+    const v_int: WarpRegister(i32) = @intFromFloat(v);
 
-    const image_x_float: WarpRegister(f32) = u * u_scale;
-    const image_y_float: WarpRegister(f32) = v * v_scale;
+    const u_repeat_mirrored_odd = @as(WarpRegister(f32), @splat(1)) - u_repeat;
+    const v_repeat_mirrored_odd = @as(WarpRegister(f32), @splat(1)) - v_repeat;
 
-    return .{ .x = image_x_float, .y = image_y_float };
+    const zero_vec: WarpRegister(i32) = @splat(0);
+    const one_vec: WarpRegister(i32) = @splat(1);
+
+    const u_repeat_mirrored = @select(f32, u_int & one_vec == zero_vec, u_repeat, u_repeat_mirrored_odd);
+
+    const v_repeat_mirrored = @select(f32, v_int & one_vec == zero_vec, v_repeat, v_repeat_mirrored_odd);
+
+    const u_clamp_to_edge = @max(@min(u, @as(WarpRegister(f32), @splat(1))), @as(WarpRegister(f32), @splat(0)));
+    const v_clamp_to_edge = @max(@min(v, @as(WarpRegister(f32), @splat(1))), @as(WarpRegister(f32), @splat(0)));
+
+    const u_is_repeat = descriptor.sampler_address_mode_u == .repeat or descriptor.sampler_address_mode_u == .repeat_mirrored;
+    const v_is_repeat = descriptor.sampler_address_mode_v == .repeat or descriptor.sampler_address_mode_v == .repeat_mirrored;
+
+    const u_repeated = @select(
+        f32,
+        @as(WarpRegister(bool), @splat(descriptor.sampler_address_mode_u == .repeat)),
+        u_repeat,
+        u_repeat_mirrored,
+    );
+
+    const u_clamped = @select(
+        f32,
+        @as(WarpRegister(bool), @splat(descriptor.sampler_address_mode_u == .clamp_to_edge)),
+        u_clamp_to_edge,
+        u,
+    );
+
+    const v_repeated = @select(
+        f32,
+        @as(WarpRegister(bool), @splat(descriptor.sampler_address_mode_v == .repeat)),
+        v_repeat,
+        v_repeat_mirrored,
+    );
+
+    const v_clamped = @select(
+        f32,
+        @as(WarpRegister(bool), @splat(descriptor.sampler_address_mode_v == .clamp_to_edge)),
+        v_clamp_to_edge,
+        v,
+    );
+
+    u = @select(
+        f32,
+        @as(WarpRegister(bool), @splat(u_is_repeat)),
+        u_repeated,
+        u_clamped,
+    );
+
+    v = @select(
+        f32,
+        @as(WarpRegister(bool), @splat(v_is_repeat)),
+        v_repeated,
+        v_clamped,
+    );
+
+    const u_scale = exp2IntX(@splat(descriptor.width_log2));
+    const v_scale = exp2IntX(@splat(descriptor.height_log2));
+
+    const half: WarpRegister(f32) = @splat(0.5);
+
+    //Computes u(uscale - 1) = u(width - 1) and the same for v
+    const image_x_float = @mulAdd(WarpRegister(f32), u, u_scale, -u);
+    const image_y_float = @mulAdd(WarpRegister(f32), v, v_scale, -v);
+
+    return .{ .x = image_x_float + half, .y = image_y_float + half };
 }
 
 ///Returns the physical image coordinates for the normalized sampler coordinates
@@ -1858,17 +1917,6 @@ pub inline fn imageSamplerAddress(
     uv: WarpVec2(f32),
 ) WarpVec2(i32) {
     @setRuntimeSafety(false);
-
-    const half: WarpRegister(f32) = @splat(0.5);
-    _ = half; // autofix
-
-    const u_scale: WarpRegister(f32) = @splat(@floatFromInt((@as(u32, 1) << @as(u5, descriptor.width_log2)) - 1));
-    const v_scale: WarpRegister(f32) = @splat(@floatFromInt((@as(u32, 1) << @as(u5, descriptor.height_log2)) - 1));
-
-    const inv_u_scale = @as(WarpRegister(f32), @splat(1)) / u_scale;
-    _ = inv_u_scale; // autofix
-    const inv_v_scale = @as(WarpRegister(f32), @splat(1)) / v_scale;
-    _ = inv_v_scale; // autofix
 
     const scaled_uv = imageSamplerAddressFloat(descriptor, .{
         .x = uv.x,
@@ -1903,11 +1951,13 @@ pub inline fn imageAddress(
     return base_address + pixel_address;
 }
 
+pub const imageMipBaseAddress = imageMipBaseAddressIterative;
+
 ///This is a floating point approximation of the exact formula for computing the start of a mip level
 ///From limited testing it seems this breaks down very slightly (with small errors) in textures
 ///whose width or height exceed around 2^12 (4096)
 //TODO: consider an alternative mip chain layout which trades more memory usage for accuracy in large textures
-pub inline fn imageMipBaseAddress(
+pub inline fn imageMipBaseAddressApprox(
     descriptor: ImageDescriptor,
     level: WarpRegister(u32),
 ) WarpRegister(u32) {
@@ -1936,6 +1986,85 @@ pub inline fn imageMipBaseAddress(
     const base: WarpRegister(u32) = @intFromFloat(@ceil(base_approx));
 
     return base;
+}
+
+//TODO: Use this instead of the approx function?
+pub inline fn imageMipBaseAddressIterative(
+    descriptor: ImageDescriptor,
+    level: WarpRegister(u32),
+) WarpRegister(u32) {
+    const width_height_exponent: WarpRegister(u5) = @splat(@as(u5, descriptor.width_log2) + @as(u5, descriptor.height_log2));
+
+    const one_vec: WarpRegister(u32) = @splat(1);
+
+    const width_height = one_vec << width_height_exponent;
+
+    var base_address: WarpRegister(u32) = @splat(0);
+    var k: WarpRegister(u32) = @splat(0);
+
+    while (true) {
+        const execution_mask = k < level;
+        const terminate = @reduce(.Or, execution_mask) == false;
+
+        const add_mask_true: WarpRegister(u32) = @splat(std.math.maxInt(u32));
+        const add_mask_false: WarpRegister(u32) = @splat(0);
+
+        const add_mask: WarpRegister(u32) = @select(
+            u32,
+            execution_mask,
+            add_mask_true,
+            add_mask_false,
+        );
+
+        const term = width_height >> @as(WarpRegister(u5), @truncate(k + k));
+
+        base_address += term & add_mask;
+
+        k += one_vec;
+
+        if (terminate) {
+            break;
+        }
+    }
+
+    return base_address;
+}
+
+comptime {
+    if (false) {
+        var desc: ImageDescriptor = @bitCast(@as(u64, 0));
+        desc.width_log2 = 13;
+        desc.height_log2 = 13;
+
+        const width = @as(u32, 1) << desc.width_log2;
+        _ = width; // autofix
+        const height = @as(u32, 1) << desc.height_log2;
+        _ = height; // autofix
+
+        var mip_count: u32 = 0;
+
+        {
+            const wh_exponent: u32 = (@as(u32, desc.width_log2) + @as(u32, desc.height_log2));
+
+            //equivelent to divCeil(wh_exponent, 2);
+            mip_count = (wh_exponent >> 1) + @intFromBool(wh_exponent & 1 != 0);
+        }
+
+        const subtraction = std.simd.reverseOrder(std.simd.iota(u32, 8));
+        const level = @as(WarpRegister(u32), @splat(@intCast(mip_count))) - subtraction;
+
+        @compileLog(level);
+
+        const base_addr = imageMipBaseAddressIterative(desc, level);
+        const base_addr_approx = imageMipBaseAddressApprox(desc, level);
+
+        @compileLog(base_addr);
+
+        const a: WarpRegister(i32) = @intCast(base_addr);
+        const b: WarpRegister(i32) = @intCast(base_addr_approx);
+
+        @compileLog(b - a);
+    }
 }
 
 ///Computes 2^x where x is an integer, returning a float 32 vector

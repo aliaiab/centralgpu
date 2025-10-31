@@ -166,6 +166,9 @@ pub fn main() !void {
         test_texture_data.ptr,
     );
     gl.glGenerateMipmap(gl.GL_TEXTURE_2D);
+    gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_MIRRORED_REPEAT);
+    gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_MIRRORED_REPEAT);
+
     gl.glBindTexture(gl.GL_TEXTURE_2D, 0);
 
     const use_gpu_for_scaling: bool = @import("builtin").mode == .Debug;
@@ -268,13 +271,13 @@ pub fn main() !void {
             gl.glTexCoord2f(0, 0);
             gl.glVertex2f(0, 0);
 
-            gl.glTexCoord2f(0, 2);
+            gl.glTexCoord2f(0, 4);
             gl.glVertex2f(0, 1);
 
-            gl.glTexCoord2f(2, 2);
+            gl.glTexCoord2f(4, 4);
             gl.glVertex2f(1, 1);
 
-            gl.glTexCoord2f(2, 0);
+            gl.glTexCoord2f(4, 0);
             gl.glVertex2f(1, 0);
 
             gl.glEnd();
