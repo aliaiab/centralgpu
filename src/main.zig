@@ -140,34 +140,27 @@ pub fn main() !void {
 
     gl.glGenTextures(1, &test_texture_handle);
 
-    std.debug.assert(test_texture_handle != 0);
-
     gl.glBindTexture(gl.GL_TEXTURE_2D, test_texture_handle);
 
-    gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR_MIPMAP_LINEAR);
+    gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR);
     gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_LINEAR_MIPMAP_LINEAR);
 
-    gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_EDGE);
-    gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE);
+    gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_MIRRORED_REPEAT);
+    gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_MIRRORED_REPEAT);
 
     gl.glTexImage2D(
         gl.GL_TEXTURE_2D,
         0,
         gl.GL_RGBA,
-        // 1024,
-        // 256,
         1024,
         1024,
-        // 242,
-        // 84,
         0,
         gl.GL_RGBA,
         gl.GL_UNSIGNED_BYTE,
         test_texture_data.ptr,
     );
+
     gl.glGenerateMipmap(gl.GL_TEXTURE_2D);
-    gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_MIRRORED_REPEAT);
-    gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_MIRRORED_REPEAT);
 
     gl.glBindTexture(gl.GL_TEXTURE_2D, 0);
 
@@ -271,13 +264,13 @@ pub fn main() !void {
             gl.glTexCoord2f(0, 0);
             gl.glVertex2f(0, 0);
 
-            gl.glTexCoord2f(0, 4);
+            gl.glTexCoord2f(0, 2);
             gl.glVertex2f(0, 1);
 
-            gl.glTexCoord2f(4, 4);
+            gl.glTexCoord2f(2, 2);
             gl.glVertex2f(1, 1);
 
-            gl.glTexCoord2f(4, 0);
+            gl.glTexCoord2f(2, 0);
             gl.glVertex2f(1, 0);
 
             gl.glEnd();
