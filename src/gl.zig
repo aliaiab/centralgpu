@@ -55,20 +55,15 @@ pub const Context = struct {
         .width_log2 = 0,
         .height_log2 = 0,
         .max_mip_level = 0,
-        .sampler_filter = .bilinear,
+        .sampler_magnification_filter = .linear,
+        .sampler_minification_filter = .linear,
+        .sampler_mipmap_filter = .nearest,
         .sampler_address_mode_u = .repeat,
         .sampler_address_mode_v = .repeat,
         .rel_ptr = -1,
         .border_colour = .white,
     },
-    textures: std.ArrayListUnmanaged(struct {
-        texture_data: []centralgpu.Rgba32 = &.{},
-        descriptor: centralgpu.ImageDescriptor = undefined,
-        internal_format: i32 = 0,
-        width: u32 = 0,
-        height: u32 = 0,
-        level_count: u32 = 0,
-    }) = .empty,
+    textures: std.ArrayListUnmanaged(TextureState) = .empty,
     ///Maps from GL_TEXTURE_0..80
     texture_units: [80]u32 = @splat(0),
     texture_unit_enabled: [80]bool = @splat(false),
@@ -138,6 +133,29 @@ pub const Context = struct {
     pixel_store: struct {
         unpack_row_length: usize = 0,
     } = .{},
+};
+
+pub const TextureState = struct {
+    texture_data: []centralgpu.Rgba32 = &.{},
+    descriptor: centralgpu.ImageDescriptor = .{
+        .rel_ptr = 0,
+        .max_mip_level = 0,
+        .width_log2 = 0,
+        .height_log2 = 0,
+        .sampler_magnification_filter = .linear,
+        .sampler_minification_filter = .linear,
+        .sampler_mipmap_filter = .nearest,
+        .sampler_address_mode_u = .repeat,
+        .sampler_address_mode_v = .repeat,
+        .border_colour = .black_transparent,
+    },
+    internal_format: i32 = 0,
+    width: u32 = 0,
+    height: u32 = 0,
+    max_defined_level: u32 = 0,
+    //This is for the scenario where an image has it's mipmapping parameter changed before glTexImage
+    //We can't update the descriptor until we know the texture's width and/or height
+    mipmapping_enabled: bool = false,
 };
 
 pub const DrawCommandState = struct {
@@ -401,7 +419,11 @@ pub export fn glTexSubImage2D(
 
     const texture = &context.textures.items[context.texture_units[context.texture_unit_active] - 1];
 
-    texture.descriptor.max_mip_level = @max(texture.descriptor.max_mip_level, @as(u4, @intCast(level)));
+    texture.max_defined_level = @max(texture.max_defined_level, @as(u4, @intCast(level)));
+
+    if (texture.mipmapping_enabled) {
+        texture.descriptor.max_mip_level = @intCast(texture.max_defined_level);
+    }
 
     const component_count: usize = internalFormatComponentCount(texture.internal_format);
 
@@ -731,16 +753,15 @@ pub export fn glTexImage2D(
     const image_data = std.heap.page_allocator.alloc(centralgpu.Rgba32, dest_data_size) catch @panic("");
 
     texture.texture_data = image_data;
-    texture.descriptor = .{
-        .rel_ptr = 0,
-        .max_mip_level = 0,
-        .width_log2 = @intCast(std.math.log2_int(usize, @intCast(width))),
-        .height_log2 = @intCast(std.math.log2_int(usize, @intCast(height))),
-        .sampler_filter = .bilinear,
-        .sampler_address_mode_u = .repeat,
-        .sampler_address_mode_v = .repeat,
-        .border_colour = .black_transparent,
-    };
+
+    texture.descriptor.width_log2 = @intCast(std.math.log2_int(usize, @intCast(width)));
+    texture.descriptor.height_log2 = @intCast(std.math.log2_int(usize, @intCast(height)));
+
+    if (texture.mipmapping_enabled) {
+        texture.descriptor.max_mip_level = @intCast(texture.max_defined_level);
+    } else {
+        texture.descriptor.max_mip_level = 0;
+    }
 
     if (data != null) {
         glTexSubImage2D(
@@ -951,20 +972,23 @@ pub export fn glTexParameteri(
     pname: i32,
     param: i32,
 ) callconv(.c) void {
-    _ = target; // autofix
+    if (target != GL_TEXTURE_2D) {
+        @panic("Only GL_TEXTURE_2D supported");
+    }
+
     const context = current_context.?;
 
+    var texture: ?*TextureState = null;
     var descriptor: *centralgpu.ImageDescriptor = undefined;
 
     if (context.texture_units[context.texture_unit_active] != 0) {
-        const texture = &context.textures.items[context.texture_units[context.texture_unit_active] - 1];
-        descriptor = &texture.descriptor;
+        texture = &context.textures.items[context.texture_units[context.texture_unit_active] - 1];
+        descriptor = &texture.?.descriptor;
     } else {
         descriptor = &context.default_texture_descriptor;
     }
 
     switch (pname) {
-        // GL_TEXTURE_MIN_FILTER,
         GL_TEXTURE_MAG_FILTER,
         => {
             switch (param) {
@@ -972,15 +996,63 @@ pub export fn glTexParameteri(
                 GL_NEAREST_MIPMAP_LINEAR,
                 GL_NEAREST_MIPMAP_NEAREST,
                 => {
-                    descriptor.sampler_filter = .nearest;
+                    descriptor.sampler_magnification_filter = .nearest;
                 },
                 GL_LINEAR,
                 GL_LINEAR_MIPMAP_NEAREST,
                 GL_LINEAR_MIPMAP_LINEAR,
                 => {
-                    descriptor.sampler_filter = .bilinear;
+                    descriptor.sampler_magnification_filter = .linear;
                 },
                 else => {},
+            }
+        },
+        GL_TEXTURE_MIN_FILTER,
+        => {
+            switch (param) {
+                GL_NEAREST,
+                => {
+                    descriptor.sampler_minification_filter = .nearest;
+                    descriptor.max_mip_level = 0;
+
+                    if (texture != null) texture.?.mipmapping_enabled = false;
+                },
+                GL_NEAREST_MIPMAP_LINEAR,
+                GL_NEAREST_MIPMAP_NEAREST,
+                => {
+                    descriptor.sampler_minification_filter = .nearest;
+
+                    if (texture != null) {
+                        texture.?.mipmapping_enabled = true;
+                        descriptor.max_mip_level = @intCast(texture.?.max_defined_level);
+                    }
+                },
+                GL_LINEAR => {
+                    descriptor.sampler_minification_filter = .linear;
+                    descriptor.max_mip_level = 0;
+
+                    if (texture != null) texture.?.mipmapping_enabled = false;
+                },
+                GL_LINEAR_MIPMAP_NEAREST,
+                GL_LINEAR_MIPMAP_LINEAR,
+                => {
+                    descriptor.sampler_minification_filter = .linear;
+                    descriptor.max_mip_level = descriptor.mipLevelCount();
+
+                    if (texture != null) {
+                        texture.?.mipmapping_enabled = true;
+                        descriptor.max_mip_level = @intCast(texture.?.max_defined_level);
+                    }
+                },
+                else => {},
+            }
+
+            if (param == GL_LINEAR_MIPMAP_LINEAR or param == GL_NEAREST_MIPMAP_LINEAR) {
+                descriptor.sampler_mipmap_filter = .linear;
+            }
+
+            if (param == GL_LINEAR_MIPMAP_NEAREST or param == GL_NEAREST_MIPMAP_NEAREST) {
+                descriptor.sampler_mipmap_filter = .nearest;
             }
         },
         GL_TEXTURE_WRAP_S => {
@@ -1070,7 +1142,7 @@ pub export fn glGenerateMipmap(
             src_mip + 1,
             texture.texture_data.ptr,
             texture.texture_data.ptr,
-            .bilinear,
+            .linear,
         );
 
         descriptor.max_mip_level += 1;
@@ -1903,7 +1975,7 @@ pub export fn glFlush() callconv(.c) void {
 pub fn flushWithoutCallback() callconv(.c) void {
     const context = current_context.?;
 
-    if (context.should_clear_color_attachment) {
+    if (context.should_clear_color_attachment or true) {
         const colour_image_words: []u32 = @ptrCast(@alignCast(context.bound_render_target.pixel_ptr[0 .. context.bound_render_target.width * context.bound_render_target.height]));
 
         const colour_image: []@Vector(8, u32) = @ptrCast(@alignCast(colour_image_words));
@@ -1913,7 +1985,7 @@ pub fn flushWithoutCallback() callconv(.c) void {
         context.should_clear_color_attachment = false;
     }
 
-    if (context.should_clear_depth_attachment) {
+    if (context.should_clear_depth_attachment or true) {
         //TODO: handle not clearing the stencil values
         const depth_clear = centralgpu.packDepthStencil(@splat(0), @splat(0xff));
         const depth_image: []@Vector(8, u32) = @ptrCast(@alignCast(context.depth_image));

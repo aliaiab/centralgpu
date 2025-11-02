@@ -50,15 +50,17 @@ pub const ImageDescriptor = packed struct(u64) {
     width_log2: u4,
     height_log2: u4,
     max_mip_level: u4,
-    sampler_filter: SamplerFilter,
+    sampler_minification_filter: SamplerFilter,
+    sampler_magnification_filter: SamplerFilter,
+    sampler_mipmap_filter: SamplerFilter,
     sampler_address_mode_u: SamplerAddressMode,
     sampler_address_mode_v: SamplerAddressMode,
     border_colour: BorderColour,
-    _: u12 = 0,
+    _: u10 = 0,
 
     pub const SamplerFilter = enum(u1) {
         nearest,
-        bilinear,
+        linear,
     };
 
     pub const SamplerAddressMode = enum(u2) {
@@ -160,6 +162,20 @@ pub fn WarpVec4(comptime T: type) type {
         y: WarpRegister(T),
         z: WarpRegister(T),
         w: WarpRegister(T),
+
+        pub const one: @This() = .{
+            .x = @splat(1),
+            .y = @splat(1),
+            .z = @splat(1),
+            .w = @splat(1),
+        };
+
+        pub const zero: @This() = .{
+            .x = @splat(0),
+            .y = @splat(0),
+            .z = @splat(0),
+            .w = @splat(0),
+        };
 
         pub inline fn init(
             values: [4]f32,
@@ -904,7 +920,7 @@ pub fn rasterizeTileTriangles(
                     execution_mask &= bary_1 >= @as(WarpRegister(f32), @splat(0));
                     execution_mask &= bary_2 >= @as(WarpRegister(f32), @splat(0));
 
-                    const visualize_triangle_boxes = true;
+                    const visualize_triangle_boxes = false;
                     const visualize_wireframe: bool = false;
 
                     if (@reduce(.Or, execution_mask) == false and !visualize_triangle_boxes) {
@@ -1559,8 +1575,8 @@ pub inline fn imageSampleDerivative(
 ) WarpVec4(f32) {
     @setRuntimeSafety(false);
 
-    const texture_width: WarpRegister(f32) = @splat(@floatFromInt(@as(u32, 1) << @as(u5, descriptor.width_log2)));
-    const texture_height: WarpRegister(f32) = @splat(@floatFromInt(@as(u32, 1) << @as(u5, descriptor.height_log2)));
+    const texture_width: WarpRegister(f32) = @splat(exp2IntXScalar(descriptor.width_log2));
+    const texture_height: WarpRegister(f32) = @splat(exp2IntXScalar(descriptor.height_log2));
 
     const scaled_du_dx = u_derivative.x * texture_width;
     const scaled_du_dy = u_derivative.y * texture_width;
@@ -1568,44 +1584,98 @@ pub inline fn imageSampleDerivative(
     const scaled_dv_dx = v_derivative.x * texture_height;
     const scaled_dv_dy = v_derivative.y * texture_height;
 
-    const length_x = scaled_du_dx * scaled_du_dx + scaled_dv_dx * scaled_dv_dx;
-    const length_y = scaled_du_dy * scaled_du_dy + scaled_dv_dy * scaled_dv_dy;
-    const rho_factor = @max(length_x, length_y);
-    var mip_level = @max(@as(WarpRegister(f32), @splat(0)), fastApproxLog2(rho_factor));
+    const two_vec: WarpRegister(f32) = @splat(1);
+
+    //The texture is being magnified when du/dx < 1
+    const magnification = (scaled_du_dx <= two_vec) |
+        (scaled_du_dy <= two_vec) |
+        (scaled_dv_dx <= two_vec) |
+        (scaled_dv_dy <= two_vec);
+
+    const use_mag_filter = @reduce(.Or, magnification);
+    _ = use_mag_filter; // autofix
+
+    var length_x_sqr: WarpRegister(f32) = scaled_du_dx * scaled_du_dx;
+
+    length_x_sqr = @mulAdd(WarpRegister(f32), scaled_dv_dx, scaled_dv_dx, length_x_sqr);
+
+    var length_y_sqr: WarpRegister(f32) = scaled_du_dy * scaled_du_dy;
+
+    length_y_sqr = @mulAdd(WarpRegister(f32), scaled_dv_dy, scaled_dv_dy, length_y_sqr);
+
+    const rho_factor_sqr = @max(length_x_sqr, length_y_sqr);
+
+    var mip_level = @max(@as(WarpRegister(f32), @splat(0)), fastApproxLog2(rho_factor_sqr));
 
     mip_level *= @splat(0.5);
 
-    const visualize_mip_level = false;
+    const max_level: WarpRegister(u32) = @splat(descriptor.max_mip_level);
+
+    var level: WarpRegister(u32) = @intFromFloat(mip_level);
+    level = @min(max_level, level);
 
     @setEvalBranchQuota(10000);
 
-    const mip_colours: [7]u32 = .{
-        packUnorm4x(.init(.{ 1, 1, 1, 1 }))[0],
-        packUnorm4x(.init(.{ 1, 0, 0, 1 }))[0],
-        packUnorm4x(.init(.{ 0, 1, 0, 1 }))[0],
-        packUnorm4x(.init(.{ 0, 0, 1, 1 }))[0],
-        packUnorm4x(.init(.{ 0, 1, 1, 1 }))[0],
-        packUnorm4x(.init(.{ 1, 0, 1, 1 }))[0],
-        packUnorm4x(.init(.{ 1, 1, 0, 1 }))[0],
-    };
+    const visualize_mip_level = false;
 
     if (visualize_mip_level) {
-        var mip_level_index: WarpRegister(u32) = @intFromFloat(mip_level);
+        const mip_colours: [7]u32 = .{
+            packUnorm4x(.init(.{ 1, 1, 1, 1 }))[0],
+            packUnorm4x(.init(.{ 1, 0, 0, 1 }))[0],
+            packUnorm4x(.init(.{ 0, 1, 0, 1 }))[0],
+            packUnorm4x(.init(.{ 0, 0, 1, 1 }))[0],
+            packUnorm4x(.init(.{ 0, 1, 1, 1 }))[0],
+            packUnorm4x(.init(.{ 1, 0, 1, 1 }))[0],
+            packUnorm4x(.init(.{ 1, 1, 0, 1 }))[0],
+        };
 
+        var mip_level_index: WarpRegister(u32) = @intFromFloat(mip_level);
         mip_level_index = std.math.clamp(mip_level_index, @as(WarpRegister(u32), @splat(0)), @as(WarpRegister(u32), @splat(mip_colours.len - 1)));
 
-        const colour_packed = maskedGather(u32, execution_mask, &mip_colours, mip_level_index);
-        const colour = unpackUnorm4x(colour_packed);
+        const next_level = @min(max_level, level + @as(WarpRegister(u32), @splat(1)));
 
-        return colour;
+        const colour_packed = maskedGather(u32, execution_mask, &mip_colours, mip_level_index);
+        const colour_packed_2 = maskedGather(u32, execution_mask, &mip_colours, next_level);
+
+        const colour = unpackUnorm4x(colour_packed);
+        const colour_2 = unpackUnorm4x(colour_packed_2);
+
+        const t = mip_level - @floor(mip_level);
+        const one_minus_t = @as(WarpRegister(f32), @splat(1)) - t;
+
+        var sample_result_0: WarpVec4(f32) = .zero;
+
+        sample_result_0 = colour.scale(one_minus_t);
+        sample_result_0 = sample_result_0.add(colour_2.scale(t));
+
+        return switch (descriptor.sampler_mipmap_filter) {
+            .linear => sample_result_0,
+            .nearest => colour,
+        };
     }
 
-    const max_level: WarpRegister(u32) = @splat(descriptor.max_mip_level);
+    const sample_0 = imageSample(execution_mask, base, descriptor, level, uv);
 
-    var level: WarpRegister(u32) = @intFromFloat(@floor(mip_level));
-    level = @min(max_level, level);
+    switch (descriptor.sampler_mipmap_filter) {
+        .nearest => {
+            return sample_0;
+        },
+        .linear => {
+            const next_level = @min(max_level, level + @as(WarpRegister(u32), @splat(1)));
 
-    return imageSample(execution_mask, base, descriptor, level, uv);
+            const t = mip_level - @floor(mip_level);
+            const one_minus_t = @as(WarpRegister(f32), @splat(1)) - t;
+
+            const sample_1 = imageSample(execution_mask, base, descriptor, next_level, uv);
+
+            var sample_result: WarpVec4(f32) = .zero;
+
+            sample_result = sample_0.scale(one_minus_t);
+            sample_result = sample_result.add(sample_1.scale(t));
+
+            return sample_result;
+        },
+    }
 }
 
 pub inline fn imageSample(
@@ -1616,9 +1686,9 @@ pub inline fn imageSample(
     level: WarpRegister(u32),
     uv: WarpVec2(f32),
 ) WarpVec4(f32) {
-    switch (descriptor.sampler_filter) {
+    switch (descriptor.sampler_magnification_filter) {
         .nearest => return imageSampleNearest(execution_mask, base, descriptor, level, uv),
-        .bilinear => return imageSampleBilinear(execution_mask, base, descriptor, level, uv),
+        .linear => return imageSampleBilinear(execution_mask, base, descriptor, level, uv),
     }
 }
 
@@ -1898,8 +1968,8 @@ pub inline fn imageSamplerAddressFloat(
         v_clamped,
     );
 
-    const u_scale = exp2IntX(@splat(descriptor.width_log2));
-    const v_scale = exp2IntX(@splat(descriptor.height_log2));
+    const u_scale: WarpRegister(f32) = @splat(exp2IntXScalar(descriptor.width_log2));
+    const v_scale: WarpRegister(f32) = @splat(exp2IntXScalar(descriptor.height_log2));
 
     const half: WarpRegister(f32) = @splat(0.5);
 
@@ -1962,8 +2032,8 @@ pub inline fn imageMipBaseAddressApprox(
     level: WarpRegister(u32),
 ) WarpRegister(u32) {
     //This is width * height which is equal to 2^width_log2 * 2^height_log2 = 2^(width_log2 + height_log2)
-    const width_height_exponent: WarpRegister(u32) = @splat(@as(u32, descriptor.width_log2) + @as(u32, descriptor.height_log2));
-    const width_height = exp2IntX(width_height_exponent);
+    const width_height_exponent: u32 = @as(u32, descriptor.width_log2) + @as(u32, descriptor.height_log2);
+    const width_height: WarpRegister(f32) = @splat(exp2IntXScalar(width_height_exponent));
 
     var four_to_level_int_exponent: WarpRegister(u32) = level;
     //Multiply by 2, so that we exponentiate with base 4
@@ -2030,41 +2100,13 @@ pub inline fn imageMipBaseAddressIterative(
     return base_address;
 }
 
-comptime {
-    if (false) {
-        var desc: ImageDescriptor = @bitCast(@as(u64, 0));
-        desc.width_log2 = 13;
-        desc.height_log2 = 13;
+pub inline fn exp2IntXScalar(x: u32) f32 {
+    var exponent_bits = x;
+    //Convert to a float as above
+    exponent_bits += 127;
+    exponent_bits <<= 23;
 
-        const width = @as(u32, 1) << desc.width_log2;
-        _ = width; // autofix
-        const height = @as(u32, 1) << desc.height_log2;
-        _ = height; // autofix
-
-        var mip_count: u32 = 0;
-
-        {
-            const wh_exponent: u32 = (@as(u32, desc.width_log2) + @as(u32, desc.height_log2));
-
-            //equivelent to divCeil(wh_exponent, 2);
-            mip_count = (wh_exponent >> 1) + @intFromBool(wh_exponent & 1 != 0);
-        }
-
-        const subtraction = std.simd.reverseOrder(std.simd.iota(u32, 8));
-        const level = @as(WarpRegister(u32), @splat(@intCast(mip_count))) - subtraction;
-
-        @compileLog(level);
-
-        const base_addr = imageMipBaseAddressIterative(desc, level);
-        const base_addr_approx = imageMipBaseAddressApprox(desc, level);
-
-        @compileLog(base_addr);
-
-        const a: WarpRegister(i32) = @intCast(base_addr);
-        const b: WarpRegister(i32) = @intCast(base_addr_approx);
-
-        @compileLog(b - a);
-    }
+    return @bitCast(exponent_bits);
 }
 
 ///Computes 2^x where x is an integer, returning a float 32 vector
@@ -2261,7 +2303,8 @@ pub fn imageBlit(
 ) void {
     var src_descriptor = src_image;
 
-    src_descriptor.sampler_filter = filter;
+    src_descriptor.sampler_magnification_filter = filter;
+    src_descriptor.sampler_minification_filter = filter;
 
     var dst_width = @as(u32, 1) << dst_image.width_log2;
     var dst_height = @as(u32, 1) << dst_image.height_log2;
@@ -2435,10 +2478,12 @@ pub fn homogenousProject(v: Homogenous2D) WarpVec2(f32) {
 }
 
 ///Computes an approxmation of log_2(z) based on a taylor polynomial
+///z must never be negative, as this function does not handle that undefined case
+///Partially based on https://github.com/Geolm/math_intrinsics/
 fn fastApproxLog2(z: WarpRegister(f32)) WarpRegister(f32) {
-    const z_as_int: WarpRegister(u32) = @bitCast(@abs(z));
-    const z_exponent_bits = z_as_int >> @as(WarpRegister(f32), @splat(23));
-    const z_mantissa = (z_as_int << @as(WarpRegister(f32), @splat(9))) >> @as(WarpRegister(f32), @splat(9));
+    const z_bits: WarpRegister(u32) = @bitCast(z);
+    const z_exponent_bits = z_bits >> @as(WarpRegister(u5), @splat(23));
+    const z_mantissa = (z_bits << @as(WarpRegister(u5), @splat(9))) >> @as(WarpRegister(u5), @splat(9));
 
     const z_exponent_bits_normalized = z_exponent_bits - @as(WarpRegister(u32), @splat(127));
 
@@ -2448,32 +2493,28 @@ fn fastApproxLog2(z: WarpRegister(f32)) WarpRegister(f32) {
     const exp0_f32_bits: WarpRegister(u32) = @bitCast(exp0_f32);
 
     const y_bits = exp0_f32_bits | z_mantissa;
-    const y: WarpRegister(f32) = @bitCast(y_bits);
+    const t: WarpRegister(f32) = @bitCast(y_bits);
 
     const one_vec: WarpRegister(f32) = @splat(1);
 
-    const t_numerator = y - one_vec;
-    const t_denominator = y + one_vec;
-    const t = t_numerator / t_denominator;
-    const t_2 = t * t;
-    const t_3 = t * t_2;
-    const t_4 = t_3 * t;
+    const result = hornerPolynomial(
+        t,
+        &.{ -3.4436006e-2, 3.1821337e-1, -1.2315303, 2.5988452, -3.3241990, 3.1157899 },
+    );
 
-    var result: WarpRegister(f32) = t;
+    return @mulAdd(WarpRegister(f32), t - one_vec, result, z_exponent);
+}
 
-    const coeff0: WarpRegister(f32) = @splat(-1.0 / 2.0);
-    const coeff1: WarpRegister(f32) = @splat(1.0 / 3.0);
-    const coeff2: WarpRegister(f32) = @splat(-1.0 / 4.0);
+///Evaluates the polynomial defined by coeffs at x
+///f(x) = a_0 + (a_1)x + a_2(x^2) + ...
+inline fn hornerPolynomial(x: WarpRegister(f32), comptime coeffs: []const f32) WarpRegister(f32) {
+    var result: WarpRegister(f32) = @splat(coeffs[0]);
 
-    const multiplier: WarpRegister(f32) = @splat(2.0 / @log(2.0));
+    inline for (1..coeffs.len) |n| {
+        result = @mulAdd(WarpRegister(f32), x, result, @splat(coeffs[n]));
+    }
 
-    result = @mulAdd(WarpRegister(f32), t_2, coeff0, result);
-    result = @mulAdd(WarpRegister(f32), t_3, coeff1, result);
-    result = @mulAdd(WarpRegister(f32), t_4, coeff2, result);
-
-    const poly_result = result * multiplier;
-
-    return z_exponent + poly_result;
+    return result;
 }
 
 const std = @import("std");
