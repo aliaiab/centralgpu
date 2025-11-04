@@ -1605,14 +1605,18 @@ pub inline fn imageSampleDerivative(
 
     const rho_factor_sqr = @max(length_x_sqr, length_y_sqr);
 
-    var mip_level = @max(@as(WarpRegister(f32), @splat(0)), fastApproxLog2(rho_factor_sqr));
+    var lambda = fastApproxLog2(rho_factor_sqr);
 
-    mip_level *= @splat(0.5);
+    lambda *= @splat(0.5);
+
+    const mip_level = @max(@as(WarpRegister(f32), @splat(0)), lambda);
 
     const max_level: WarpRegister(u32) = @splat(descriptor.max_mip_level);
 
     var level: WarpRegister(u32) = @intFromFloat(mip_level);
     level = @min(max_level, level);
+
+    const use_magnification = @reduce(.Or, lambda < @as(WarpRegister(f32), @splat(0)));
 
     @setEvalBranchQuota(10000);
 
@@ -1634,8 +1638,11 @@ pub inline fn imageSampleDerivative(
 
         const next_level = @min(max_level, level + @as(WarpRegister(u32), @splat(1)));
 
-        const colour_packed = maskedGather(u32, execution_mask, &mip_colours, mip_level_index);
-        const colour_packed_2 = maskedGather(u32, execution_mask, &mip_colours, next_level);
+        var colour_packed = maskedGather(u32, execution_mask, &mip_colours, mip_level_index);
+        var colour_packed_2 = maskedGather(u32, execution_mask, &mip_colours, next_level);
+
+        colour_packed = @select(u32, lambda < @as(WarpRegister(f32), @splat(0)), packUnorm4x(.init(.{ 1, 0, 1, 1 })), colour_packed);
+        colour_packed_2 = @select(u32, lambda < @as(WarpRegister(f32), @splat(0)), packUnorm4x(.init(.{ 1, 0, 1, 1 })), colour_packed_2);
 
         const colour = unpackUnorm4x(colour_packed);
         const colour_2 = unpackUnorm4x(colour_packed_2);
@@ -1654,7 +1661,12 @@ pub inline fn imageSampleDerivative(
         };
     }
 
-    const sample_0 = imageSample(execution_mask, base, descriptor, level, uv);
+    var altered_descriptor = descriptor;
+
+    //TODO: make this explicitly branchless?
+    altered_descriptor.sampler_magnification_filter = if (use_magnification) descriptor.sampler_magnification_filter else descriptor.sampler_minification_filter;
+
+    const sample_0 = imageSample(execution_mask, base, altered_descriptor, level, uv);
 
     switch (descriptor.sampler_mipmap_filter) {
         .nearest => {
@@ -1666,7 +1678,7 @@ pub inline fn imageSampleDerivative(
             const t = mip_level - @floor(mip_level);
             const one_minus_t = @as(WarpRegister(f32), @splat(1)) - t;
 
-            const sample_1 = imageSample(execution_mask, base, descriptor, next_level, uv);
+            const sample_1 = imageSample(execution_mask, base, altered_descriptor, next_level, uv);
 
             var sample_result: WarpVec4(f32) = .zero;
 

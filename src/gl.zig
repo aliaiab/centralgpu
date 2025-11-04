@@ -435,6 +435,7 @@ pub export fn glTexSubImage2D(
     const row_width: usize = if (context.pixel_store.unpack_row_length == 0) @intCast(width) else context.pixel_store.unpack_row_length;
 
     const mip_base: u32 = centralgpu.imageMipBaseAddress(texture.descriptor, @splat(@intCast(level)))[0];
+
     const dest_data_ptr: [*]centralgpu.Rgba32 = texture.texture_data.ptr + mip_base;
 
     var y: usize = start_y;
@@ -742,8 +743,8 @@ pub export fn glTexImage2D(
     std.debug.assert(std.math.isPowerOfTwo(width));
     std.debug.assert(std.math.isPowerOfTwo(height));
 
-    const padded_width = centralgpu.computeTargetPaddedSize(@intCast(width));
-    const padded_height = centralgpu.computeTargetPaddedSize(@intCast(height));
+    const padded_width: usize = @intCast(width);
+    const padded_height: usize = @intCast(height);
 
     const mip_count, const total_data_size = computeMipCountAndTotalSize(padded_width, padded_height);
     _ = mip_count; // autofix
@@ -751,6 +752,8 @@ pub export fn glTexImage2D(
     const dest_data_size: usize = @intCast(total_data_size * @sizeOf(u32));
 
     const image_data = std.heap.page_allocator.alloc(centralgpu.Rgba32, dest_data_size) catch @panic("");
+
+    @memset(image_data, .{ .r = 0, .g = 0, .b = 0, .a = 0 });
 
     texture.texture_data = image_data;
 
@@ -1111,7 +1114,9 @@ pub export fn glGetTexParameterfv(
 pub export fn glGenerateMipmap(
     target: i32,
 ) callconv(.c) void {
-    _ = target; // autofix
+    if (target != GL_TEXTURE_2D) {
+        @panic("Only GL_TEXTURE_2D is supported");
+    }
 
     var descriptor: *centralgpu.ImageDescriptor = undefined;
 
@@ -1145,7 +1150,7 @@ pub export fn glGenerateMipmap(
             .linear,
         );
 
-        descriptor.max_mip_level += 1;
+        texture.max_defined_level += 1;
 
         src_mip += 1;
 
@@ -1154,7 +1159,9 @@ pub export fn glGenerateMipmap(
         }
     }
 
-    std.debug.assert(descriptor.max_mip_level != 0);
+    if (texture.mipmapping_enabled) {
+        texture.descriptor.max_mip_level = @intCast(texture.max_defined_level);
+    }
 }
 
 pub export fn glBegin(flags: u32) callconv(.c) void {
@@ -1266,6 +1273,7 @@ fn startCommand(context: *Context) void {
     command.flags.enable_stencil_test = context.enable_stencil_test;
     command.flags.enable_backface_cull = context.enable_face_cull;
     command.flags.enable_blend = context.enable_blend;
+    command.flags.invert_depth_test = context.invert_depth_test;
 
     command.stencil_mask = context.stencil_mask;
     command.stencil_ref = context.stencil_ref;
