@@ -322,7 +322,6 @@ pub const Uniforms = struct {
     image_base: [4][*]const u8,
     image_descriptor: [4]ImageDescriptor,
     texture_environments: [4]TextureEnvironment,
-    texture_rgb_scale: f32,
 };
 
 pub const GeometryProcessState = struct {
@@ -458,6 +457,8 @@ pub const RasterState = struct {
     blend_state: BlendState,
     stencil_mask: u8,
     stencil_ref: u8,
+
+    alpha_ref: f32,
 
     render_target: Image,
     depth_image: [*]Depth24Stencil8,
@@ -1081,12 +1082,19 @@ pub fn rasterizeTileTriangles(
                                     resultant_sample.w *= texture_sample.w;
                                 },
                             }
+
+                            texture_sample.x *= @splat(texture_environment.rgb_scale);
+                            texture_sample.y *= @splat(texture_environment.rgb_scale);
+                            texture_sample.z *= @splat(texture_environment.rgb_scale);
+
+                            const one: WarpRegister(f32) = @splat(1);
+                            const zero: WarpRegister(f32) = @splat(0);
+
+                            texture_sample.x = @max(zero, @min(one, texture_sample.x));
+                            texture_sample.y = @max(zero, @min(one, texture_sample.y));
+                            texture_sample.z = @max(zero, @min(one, texture_sample.z));
                         }
                     }
-
-                    resultant_sample.x *= @splat(uniforms.texture_rgb_scale);
-                    resultant_sample.y *= @splat(uniforms.texture_rgb_scale);
-                    resultant_sample.z *= @splat(uniforms.texture_rgb_scale);
 
                     const disable_texturing = false;
 
@@ -1096,7 +1104,7 @@ pub fn rasterizeTileTriangles(
 
                     if (raster_state.flags.enable_alpha_test) {
                         //alpha test
-                        execution_mask &= color_result.w > @as(WarpRegister(f32), @splat(0.01));
+                        execution_mask &= color_result.w > @as(WarpRegister(f32), @splat(raster_state.alpha_ref));
                     }
 
                     if (raster_state.flags.enable_blend) {

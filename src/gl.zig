@@ -68,7 +68,6 @@ pub const Context = struct {
     texture_units: [80]u32 = @splat(0),
     texture_unit_enabled: [80]bool = @splat(false),
     texture_environments: [80]centralgpu.TextureEnvironment = [1]centralgpu.TextureEnvironment{.{}} ** 80,
-    texture_rgb_scale: f32 = 1,
     texture_unit_active: u32 = 0,
 
     //Vertex Registers
@@ -104,6 +103,8 @@ pub const Context = struct {
 
     stencil_mask: u8 = 0xff,
     stencil_ref: u8 = 1,
+
+    alpha_ref: f32 = 0,
 
     blend_state: centralgpu.BlendState = .{
         .src_factor = .one,
@@ -170,12 +171,13 @@ pub const DrawCommandState = struct {
     image_base: [4][*]const u8,
     image_descriptor: [4]centralgpu.ImageDescriptor,
     texture_environments: [4]centralgpu.TextureEnvironment,
-    texture_rgb_scale: f32,
 
     flags: Flags,
     blend_state: centralgpu.BlendState,
     stencil_mask: u8,
     stencil_ref: u8,
+
+    alpha_ref: f32,
 
     scissor_x: i32,
     scissor_y: i32,
@@ -879,8 +881,9 @@ pub export fn glDeleteTextures(
             }
         }
 
-        //TODO: check that data has actually been allocated
-        std.heap.page_allocator.free(texture.texture_data);
+        if (texture.texture_data.len != 0) {
+            std.heap.page_allocator.free(texture.texture_data);
+        }
     }
 }
 
@@ -900,10 +903,11 @@ pub export fn glBindTexture(
     target: i32,
     texture: u32,
 ) callconv(.c) void {
-    const context = current_context.?;
+    if (target != GL_TEXTURE_2D) {
+        @panic("Only GL_TEXTURE_2D is supported!");
+    }
 
-    const binding_index: usize = @intCast(target - GL_TEXTURE_2D);
-    _ = binding_index; // autofix
+    const context = current_context.?;
 
     if (texture != 0 and texture - 1 >= context.textures.items.len) {
         const many_to_add = (texture) - @as(u32, @intCast(context.textures.items.len));
@@ -929,7 +933,10 @@ pub export fn glTexEnvf(
     pname: i32,
     param: f32,
 ) callconv(.c) void {
-    _ = target; // autofix
+    if (target != GL_TEXTURE_ENV) {
+        @panic("Only GL_TEXTURE_ENV is supported!");
+    }
+
     const context = current_context.?;
 
     const tex_env = &context.texture_environments[context.texture_unit_active];
@@ -953,7 +960,6 @@ pub export fn glTexEnvf(
                 else => {
                     std.log.info("texture env func: 0x{x}\n", .{@as(i32, @intFromFloat(param))});
                     @panic("texture env function not supported");
-                    // return;
                 },
             };
         },
@@ -961,10 +967,10 @@ pub export fn glTexEnvf(
         GL_SOURCE1_RGB => {},
         GL_SOURCE2_RGB => {},
         GL_RGB_SCALE => {
-            context.texture_rgb_scale = param;
+            tex_env.rgb_scale = param;
         },
         else => {
-            std.log.info("0x{x}\n", .{pname});
+            std.debug.print("0x{x}\n", .{pname});
             @panic("Unsupported pname");
         },
     }
@@ -1241,7 +1247,6 @@ fn startCommand(context: *Context) void {
     command.scratch_vertex_end = 0;
 
     command.texture_environments = [1]centralgpu.TextureEnvironment{.{}} ** 4;
-    command.texture_rgb_scale = context.texture_rgb_scale;
 
     for (0..4) |descriptor_index| {
         command.image_descriptor[descriptor_index].rel_ptr = -1;
@@ -1277,6 +1282,8 @@ fn startCommand(context: *Context) void {
 
     command.stencil_mask = context.stencil_mask;
     command.stencil_ref = context.stencil_ref;
+
+    command.alpha_ref = context.alpha_ref;
 
     command.blend_state = context.blend_state;
 
@@ -1405,7 +1412,10 @@ pub export fn glPolygonMode() callconv(.c) void {}
 pub export fn glShadeModel() callconv(.c) void {}
 
 pub export fn glAlphaFunc(func: i32, ref: f32) callconv(.c) void {
-    std.log.info("func: {}, ref: {}", .{ func, ref });
+    _ = func; // autofix
+    const context = current_context.?;
+
+    context.alpha_ref = ref;
 }
 
 pub export fn glBlendFunc(
@@ -2072,6 +2082,7 @@ pub fn flushWithoutCallback() callconv(.c) void {
             .blend_state = draw_command.blend_state,
             .stencil_mask = draw_command.stencil_mask,
             .stencil_ref = draw_command.stencil_ref,
+            .alpha_ref = draw_command.alpha_ref,
             .flags = .{
                 .enable_depth_test = draw_command.flags.enable_depth_test,
                 .enable_alpha_test = draw_command.flags.enable_alpha_test,
@@ -2090,7 +2101,6 @@ pub fn flushWithoutCallback() callconv(.c) void {
             .image_base = draw_command.image_base,
             .image_descriptor = draw_command.image_descriptor,
             .texture_environments = draw_command.texture_environments,
-            .texture_rgb_scale = draw_command.texture_rgb_scale,
             .indexed_geometry = .{
                 .indices = context.indexed_geometry.indices.items,
                 .vertex_positions = context.indexed_geometry.vertex_positions.items,
