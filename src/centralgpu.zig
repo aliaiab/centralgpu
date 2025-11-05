@@ -636,11 +636,17 @@ pub fn rasterizeSubmit(
         bounds_max = homogenousProject(homogenousMax(p0_max, homogenousMax(p1_max, p2_max)));
 
         const any_are_neg = (p0.w <= zero) | (p1.w <= zero) | (p2.w <= zero);
+        const any_are_zero = (p0.w == zero) | (p1.w == zero) | (p2.w == zero);
 
         bounds_min.x = @select(f32, any_are_neg, -inf, bounds_min.x);
         bounds_min.y = @select(f32, any_are_neg, -inf, bounds_min.y);
         bounds_max.x = @select(f32, any_are_neg, inf, bounds_max.x);
         bounds_max.y = @select(f32, any_are_neg, inf, bounds_max.y);
+
+        bounds_min.x = @select(f32, any_are_zero, -inf, bounds_min.x);
+        bounds_min.y = @select(f32, any_are_zero, -inf, bounds_min.y);
+        bounds_max.x = @select(f32, any_are_zero, -inf, bounds_max.x);
+        bounds_max.y = @select(f32, any_are_zero, -inf, bounds_max.y);
 
         const viewport_scale_x: WarpRegister(f32) = @splat(geometry_state.viewport_transform.scale_x);
         const viewport_scale_y: WarpRegister(f32) = @splat(geometry_state.viewport_transform.scale_y);
