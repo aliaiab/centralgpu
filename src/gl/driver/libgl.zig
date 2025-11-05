@@ -11,16 +11,49 @@ const WaylandContext = struct {
     wm_base: ?*xdg.WmBase,
 };
 
-const target_width = 640;
-const target_height = 480;
+const default_target_width = 640;
+const default_target_height = 480;
 
-const surface_width: usize = @intCast(target_width * 1);
-const surface_height: usize = @intCast(target_height * 1);
+var target_width: usize = default_target_width;
+var target_height: usize = default_target_height;
+
+var surface_width: usize = @intCast(default_target_width * 1);
+var surface_height: usize = @intCast(default_target_height * 1);
 
 export fn glGetString(name: i32) callconv(.c) [*:0]const u8 {
     const gpa = std.heap.smp_allocator;
 
     if (centralgpu_gl.current_context == null) {
+        {
+            const env_map = std.process.getEnvMap(gpa) catch @panic("oom");
+
+            if (env_map.get("CENTRALGPU_TARGET_WIDTH")) |target_width_string| {
+                target_width = std.fmt.parseInt(usize, target_width_string, 10) catch target_width;
+            }
+
+            if (env_map.get("CENTRALGPU_TARGET_HEIGHT")) |target_height_string| {
+                target_height = std.fmt.parseInt(usize, target_height_string, 10) catch target_height;
+            }
+
+            surface_width = target_width;
+            surface_height = target_height;
+
+            if (env_map.get("CENTRALGPU_SURFACE_WIDTH")) |surface_width_string| {
+                surface_width = std.fmt.parseInt(usize, surface_width_string, 10) catch surface_width;
+            }
+
+            if (env_map.get("CENTRALGPU_SURFACE_HEIGHT")) |surface_height_string| {
+                surface_height = std.fmt.parseInt(usize, surface_height_string, 10) catch surface_height;
+            }
+
+            if (env_map.get("CENTRALGPU_SURFACE_SCALE")) |surface_scale_string| {
+                const surface_scale = std.fmt.parseInt(usize, surface_scale_string, 10) catch 1;
+
+                surface_width *= surface_scale;
+                surface_height *= surface_scale;
+            }
+        }
+
         centralgpu_gl.current_context = gpa.create(centralgpu_gl.Context) catch @panic("oom");
 
         const target_buf = gpa.alloc(centralgpu.Rgba32, target_width * target_height) catch @panic("oom");
@@ -35,9 +68,9 @@ export fn glGetString(name: i32) callconv(.c) [*:0]const u8 {
 
         centralgpu_gl.current_context.?.* = .{
             .gpa = gpa,
-            .render_area_width = target_width,
-            .render_area_height = target_height,
-            .bound_render_target = .{ .pixel_ptr = target_buf.ptr, .width = target_width, .height = target_height },
+            .render_area_width = @intCast(target_width),
+            .render_area_height = @intCast(target_height),
+            .bound_render_target = .{ .pixel_ptr = target_buf.ptr, .width = @intCast(target_width), .height = @intCast(target_height) },
             .depth_image = gpa.alloc(centralgpu.Depth24Stencil8, target_width * target_height) catch @panic("oom"),
             .flush_callback = &glFlushCallback,
             .viewport = .{
@@ -169,11 +202,8 @@ fn initWayland() !void {
     const wm_base = context.wm_base orelse return error.NoXdgWmBase;
 
     const surface = try compositor.createSurface();
-    // defer surface.destroy();
     const xdg_surface = try wm_base.getXdgSurface(surface);
-    // defer xdg_surface.destroy();
     const xdg_toplevel = try xdg_surface.getToplevel();
-    // defer xdg_toplevel.destroy();
 
     wayland_state.surface = surface;
 
@@ -206,11 +236,9 @@ fn initWayland() !void {
 
     @memset(data, 0xff);
 
-    const pool = try shm.createPool(fd, size);
-    // defer pool.destroy();
+    const pool = try shm.createPool(fd, @intCast(size));
 
-    const buffer = try pool.createBuffer(0, width, height, stride, wl.Shm.Format.xrgb8888);
-    // defer buffer.destroy();
+    const buffer = try pool.createBuffer(0, @intCast(width), @intCast(height), @intCast(stride), wl.Shm.Format.xrgb8888);
 
     wayland_state.buffer = buffer;
 
