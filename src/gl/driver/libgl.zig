@@ -11,11 +11,8 @@ const WaylandContext = struct {
     wm_base: ?*xdg.WmBase,
 };
 
-const target_width = 1280;
-const target_height = 720;
-
-// const target_width = 640;
-// const target_height = 480;
+const target_width = 640;
+const target_height = 480;
 
 const surface_width: usize = @intCast(target_width * 1);
 const surface_height: usize = @intCast(target_height * 1);
